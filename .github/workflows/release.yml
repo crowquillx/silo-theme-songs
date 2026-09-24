@@ -1,0 +1,25 @@
+name: Release
+on:
+  push:
+    tags: ['v*']
+permissions:
+  contents: write
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-go@v6
+        with:
+          go-version: '1.26.8'
+      - name: Validate
+        run: |
+          test -z "$(gofmt -l .)"
+          test "$(jq -r .version manifest.json)" = "${GITHUB_REF_NAME#v}"
+          go test -race ./...
+          go vet ./...
+      - run: python3 scripts/release.py
+      - uses: softprops/action-gh-release@v2
+        with:
+          body_path: .github/RELEASE.md
+          files: dist/*

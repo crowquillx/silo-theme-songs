@@ -1,0 +1,12 @@
+{
+  "sdk_version": "v0.17.0",
+  "sdk_commit": "488af9bde662bbbf117ec9b04748753cdf26a00c",
+  "server_contract_commit": "6f19e41bdc775a37a5048a7853839d0c4a9ac848",
+  "owner_protocol": 1,
+  "platforms": [
+    "linux/amd64",
+    "linux/arm64"
+  ],
+  "validated_on": "2026-09-24",
+  "validation_report": "validation.md"
+}

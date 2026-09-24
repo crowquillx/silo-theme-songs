@@ -1,0 +1,42 @@
+{
+  "base_url": "http://127.0.0.1:8080",
+  "api_key": "REPLACE_WITH_DEDICATED_ADMIN_API_KEY",
+  "profile_id": "REPLACE_WITH_PRIMARY_PROFILE_ID",
+  "state_dir": "/var/lib/silo/plugins/silo-theme-songs",
+  "library_ids": [
+    "1"
+  ],
+  "exclude_items": [],
+  "anime_library_ids": [],
+  "preview_only": true,
+  "manual_refresh": false,
+  "source_generation": "1",
+  "ffprobe": "/usr/bin/ffprobe",
+  "max_downloads": 10,
+  "destinations": {
+    "allowed_roots": [
+      "/media"
+    ],
+    "path_mappings": [
+      {
+        "server": "/media",
+        "local": "/media"
+      }
+    ],
+    "single_season_flat_fallback": false,
+    "destination_overrides": {}
+  },
+  "provider": {
+    "yt_dlp": "/usr/local/bin/yt-dlp",
+    "ffmpeg": "/usr/bin/ffmpeg",
+    "types": [
+      "series",
+      "movie"
+    ],
+    "url_overrides": {},
+    "allowed_audio_hosts": [],
+    "max_bytes": 83886080,
+    "timeout_seconds": 300,
+    "assisted_search": false
+  }
+}

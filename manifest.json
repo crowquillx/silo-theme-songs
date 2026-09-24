@@ -1,0 +1,162 @@
+{
+  "plugin_id": "dev.crowquillx.theme-songs",
+  "version": "0.1.0",
+  "checksum": "__CHECKSUM__",
+  "silo_api_version": "v1",
+  "supported_platforms": [
+    {
+      "os": "linux",
+      "arch": "amd64"
+    },
+    {
+      "os": "linux",
+      "arch": "arm64"
+    }
+  ],
+  "presentation": {
+    "display_name": "Theme Songs",
+    "summary": "Downloads movie and series theme audio from exact ThemerrDB matches and selected URLs.",
+    "description_markdown": "Downloads movie and series theme audio from exact ThemerrDB matches and selected URLs. Preview ownership and source choices before downloading. Existing audio is preserved.",
+    "setup_markdown": "Configure the Silo URL, a dedicated administrator API key and primary profile, writable mounts, selected libraries, and persistent state. Keep preview only enabled for the first task run. Enable this plugin's themes Autoscan source with identity path rewrites, or select manual scans. Run preview, review destinations, then enable downloads. The README contains configuration examples.",
+    "homepage_url": "https://github.com/crowquillx/silo-theme-songs",
+    "source_url": "https://github.com/crowquillx/silo-theme-songs",
+    "support_url": "https://github.com/crowquillx/silo-theme-songs/issues",
+    "changelog_url": "https://github.com/crowquillx/silo-theme-songs/releases",
+    "publisher_name": "crowquillx",
+    "publisher_url": "https://github.com/crowquillx",
+    "license_spdx": "MIT"
+  },
+  "capabilities": [
+    {
+      "type": "scheduled_task.v1",
+      "id": "sync",
+      "display_name": "Download Theme Songs",
+      "description": "Preview or download selected themes according to configuration."
+    },
+    {
+      "type": "scheduled_task.v1",
+      "id": "preview",
+      "display_name": "Preview Theme Songs",
+      "description": "Read catalog ownership and source choices without writing media."
+    },
+    {
+      "type": "scheduled_task.v1",
+      "id": "reconcile",
+      "display_name": "Reconcile Theme Songs",
+      "description": "Recheck owned files and request discovery after a source reset."
+    },
+    {
+      "type": "scan_source.v1",
+      "id": "themes",
+      "display_name": "Theme Songs changes",
+      "description": "Reports durable server-namespace owner directories to Autoscan."
+    },
+    {
+      "type": "http_routes.v1",
+      "id": "status",
+      "display_name": "Theme Songs status",
+      "description": "Administrator-only preview and discovery status."
+    }
+  ],
+  "global_config_schema": [
+    {
+      "key": "settings",
+      "title": "Theme Songs settings",
+      "description": "Connection, destination policy, and provider selection.",
+      "json_schema": "{\"type\":\"object\",\"properties\":{\"base_url\":{\"type\":\"string\",\"format\":\"uri\"},\"api_key\":{\"type\":\"string\",\"minLength\":1},\"profile_id\":{\"type\":\"string\",\"minLength\":1},\"state_dir\":{\"type\":\"string\",\"minLength\":1},\"library_ids\":{\"type\":\"array\",\"items\":{\"type\":\"string\"},\"minItems\":1},\"exclude_items\":{\"type\":\"array\",\"items\":{\"type\":\"string\"}},\"anime_library_ids\":{\"type\":\"array\",\"items\":{\"type\":\"string\"}},\"preview_only\":{\"type\":\"boolean\",\"default\":true},\"manual_refresh\":{\"type\":\"boolean\",\"default\":false},\"source_generation\":{\"type\":\"string\",\"default\":\"1\"},\"ffprobe\":{\"type\":\"string\",\"default\":\"ffprobe\"},\"max_downloads\":{\"type\":\"integer\",\"minimum\":1,\"maximum\":100,\"default\":10},\"destinations\":{\"type\":\"object\",\"properties\":{\"allowed_roots\":{\"type\":\"array\",\"items\":{\"type\":\"string\"},\"minItems\":1},\"path_mappings\":{\"type\":\"array\",\"items\":{\"type\":\"object\",\"properties\":{\"server\":{\"type\":\"string\"},\"local\":{\"type\":\"string\"}},\"required\":[\"server\",\"local\"],\"additionalProperties\":false}},\"single_season_flat_fallback\":{\"type\":\"boolean\",\"default\":false},\"destination_overrides\":{\"type\":\"object\",\"additionalProperties\":{\"type\":\"string\"}}},\"required\":[\"allowed_roots\"],\"additionalProperties\":false},\"provider\":{\"type\":\"object\"}},\"required\":[\"base_url\",\"api_key\",\"profile_id\",\"state_dir\",\"library_ids\",\"destinations\"],\"additionalProperties\":false}",
+      "required": false,
+      "admin_form": {
+        "fields": [
+          {
+            "key": "base_url",
+            "label": "Silo base URL",
+            "control": "ADMIN_FORM_CONTROL_TEXT"
+          },
+          {
+            "key": "api_key",
+            "label": "Silo administrator API key",
+            "control": "ADMIN_FORM_CONTROL_PASSWORD",
+            "secret": true
+          },
+          {
+            "key": "profile_id",
+            "label": "Primary profile ID",
+            "control": "ADMIN_FORM_CONTROL_TEXT"
+          },
+          {
+            "key": "state_dir",
+            "label": "Persistent plugin state directory",
+            "control": "ADMIN_FORM_CONTROL_TEXT"
+          },
+          {
+            "key": "library_ids",
+            "label": "Selected library IDs (JSON)",
+            "control": "ADMIN_FORM_CONTROL_TEXTAREA"
+          },
+          {
+            "key": "exclude_items",
+            "label": "Excluded item IDs (JSON)",
+            "control": "ADMIN_FORM_CONTROL_TEXTAREA"
+          },
+          {
+            "key": "anime_library_ids",
+            "label": "Anime-managed library IDs (JSON)",
+            "control": "ADMIN_FORM_CONTROL_TEXTAREA"
+          },
+          {
+            "key": "preview_only",
+            "label": "Preview only",
+            "control": "ADMIN_FORM_CONTROL_SWITCH"
+          },
+          {
+            "key": "manual_refresh",
+            "label": "Manual library scans",
+            "control": "ADMIN_FORM_CONTROL_SWITCH"
+          },
+          {
+            "key": "source_generation",
+            "label": "Scan generation",
+            "control": "ADMIN_FORM_CONTROL_TEXT"
+          },
+          {
+            "key": "ffprobe",
+            "label": "ffprobe executable",
+            "control": "ADMIN_FORM_CONTROL_TEXT"
+          },
+          {
+            "key": "max_downloads",
+            "label": "Downloads per run",
+            "control": "ADMIN_FORM_CONTROL_NUMBER"
+          },
+          {
+            "key": "destinations",
+            "label": "Writable roots and path mappings (JSON)",
+            "control": "ADMIN_FORM_CONTROL_TEXTAREA"
+          },
+          {
+            "key": "provider",
+            "label": "Provider settings (JSON)",
+            "control": "ADMIN_FORM_CONTROL_TEXTAREA"
+          }
+        ]
+      }
+    }
+  ],
+  "http_routes": [
+    {
+      "id": "status-page",
+      "method": "GET",
+      "path": "/",
+      "access": "admin",
+      "navigable": true,
+      "navigation_label": "Theme Songs",
+      "navigation_kind": "admin"
+    },
+    {
+      "id": "status-json",
+      "method": "GET",
+      "path": "/status",
+      "access": "admin"
+    }
+  ]
+}

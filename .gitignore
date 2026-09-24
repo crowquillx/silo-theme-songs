@@ -1,0 +1,7 @@
+/bin/
+/dist/
+/go.work
+/go.work.sum
+/PLAN.md
+*.local.json
+__pycache__/
