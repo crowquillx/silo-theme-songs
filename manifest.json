@@ -1,6 +1,6 @@
 {
   "plugin_id": "dev.crowquillx.theme-songs",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "checksum": "__CHECKSUM__",
   "silo_api_version": "v1",
   "supported_platforms": [
@@ -70,73 +70,73 @@
           {
             "key": "base_url",
             "label": "Silo base URL",
-            "control": "ADMIN_FORM_CONTROL_TEXT"
+            "control": 1
           },
           {
             "key": "api_key",
             "label": "Silo administrator API key",
-            "control": "ADMIN_FORM_CONTROL_PASSWORD",
+            "control": 3,
             "secret": true
           },
           {
             "key": "profile_id",
             "label": "Primary profile ID",
-            "control": "ADMIN_FORM_CONTROL_TEXT"
+            "control": 1
           },
           {
             "key": "state_dir",
             "label": "Persistent plugin state directory",
-            "control": "ADMIN_FORM_CONTROL_TEXT"
+            "control": 1
           },
           {
             "key": "library_ids",
             "label": "Selected library IDs (JSON)",
-            "control": "ADMIN_FORM_CONTROL_TEXTAREA"
+            "control": 2
           },
           {
             "key": "exclude_items",
             "label": "Excluded item IDs (JSON)",
-            "control": "ADMIN_FORM_CONTROL_TEXTAREA"
+            "control": 2
           },
           {
             "key": "anime_library_ids",
             "label": "Anime-managed library IDs (JSON)",
-            "control": "ADMIN_FORM_CONTROL_TEXTAREA"
+            "control": 2
           },
           {
             "key": "preview_only",
             "label": "Preview only",
-            "control": "ADMIN_FORM_CONTROL_SWITCH"
+            "control": 5
           },
           {
             "key": "manual_refresh",
             "label": "Manual library scans",
-            "control": "ADMIN_FORM_CONTROL_SWITCH"
+            "control": 5
           },
           {
             "key": "source_generation",
             "label": "Scan generation",
-            "control": "ADMIN_FORM_CONTROL_TEXT"
+            "control": 1
           },
           {
             "key": "ffprobe",
             "label": "ffprobe executable",
-            "control": "ADMIN_FORM_CONTROL_TEXT"
+            "control": 1
           },
           {
             "key": "max_downloads",
             "label": "Downloads per run",
-            "control": "ADMIN_FORM_CONTROL_NUMBER"
+            "control": 4
           },
           {
             "key": "destinations",
             "label": "Writable roots and path mappings (JSON)",
-            "control": "ADMIN_FORM_CONTROL_TEXTAREA"
+            "control": 2
           },
           {
             "key": "provider",
             "label": "Provider settings (JSON)",
-            "control": "ADMIN_FORM_CONTROL_TEXTAREA"
+            "control": 2
           }
         ]
       }

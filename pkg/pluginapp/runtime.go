@@ -295,7 +295,7 @@ func (s *Server) Execute(ctx context.Context, mode string) (report Report) {
 		} else {
 			for _, r := range store.Records() {
 				if r.Status == engine.Pending {
-					report.add(Row{ItemID: r.Destination.ItemID, Destination: r.ServerPath, Action: "pending", Reason: "crash recovery waits for scan source acknowledgement"})
+					report.add(Row{ItemID: r.Destination.ItemID, Season: r.Destination.Season, Destination: r.ServerPath, Action: "pending", Reason: "crash recovery waits for scan source acknowledgement"})
 				}
 			}
 		}
@@ -324,7 +324,7 @@ func (s *Server) Execute(ctx context.Context, mode string) (report Report) {
 					report.State = "reconcile_required"
 					for _, r := range store.Records() {
 						if r.Status != engine.Failed {
-							report.add(Row{ItemID: r.Destination.ItemID, Destination: r.ServerPath, Action: "reconcile_required", Reason: "run the Reconcile task for the acknowledged scan source"})
+							report.add(Row{ItemID: r.Destination.ItemID, Season: r.Destination.Season, Destination: r.ServerPath, Action: "reconcile_required", Reason: "run the Reconcile task for the acknowledged scan source"})
 						}
 					}
 				}
