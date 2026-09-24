@@ -510,8 +510,20 @@ func TestIssuedMarkerReplayIsExactAfterAppendAndRestart(t *testing.T) {
 	if _, err := e.Poll("v1", strings.Repeat("a", 48), allowed); err == nil {
 		t.Fatal("forged marker accepted")
 	}
+	reset, err := e.Poll("v2", first.NextMarker, allowed)
+	if err != nil || reset.Ready || len(reset.Paths) != 0 || reset.NextMarker == "" || e.Ready("v2") {
+		t.Fatalf("generation reset did not establish an empty baseline: %+v %v", reset, err)
+	}
+	retry, err := e.Poll("v2", first.NextMarker, allowed)
+	if err != nil || retry.NextMarker != reset.NextMarker || retry.Ready || len(retry.Paths) != 0 {
+		t.Fatalf("generation reset retry changed: %+v %v", retry, err)
+	}
+	acknowledged, err := e.Poll("v2", reset.NextMarker, allowed)
+	if err != nil || !acknowledged.Ready || len(acknowledged.Paths) != 0 {
+		t.Fatalf("generation baseline not acknowledged: %+v %v", acknowledged, err)
+	}
 	if _, err := e.Poll("v2", first.NextMarker, allowed); err == nil {
-		t.Fatal("cross-generation marker accepted")
+		t.Fatal("cross-generation marker acknowledged after reset completed")
 	}
 }
 

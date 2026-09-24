@@ -55,6 +55,14 @@ func (e *Engine) Poll(generation, marker string, allowed map[string][]string) (P
 		return PollResult{}, errors.New("engine closed")
 	}
 	g, exists := e.state.Generations[generation]
+	// A configured generation change can arrive with the host's old cursor.
+	// Return only the new empty baseline, including retries until its echo.
+	// Never reinterpret an old cursor as an acknowledgement or replay backlog.
+	if marker != "" && (!exists || !g.Ready) {
+		if previous, known := e.state.Issued[marker]; known && previous.Generation != generation {
+			marker = ""
+		}
+	}
 	if marker == "" {
 		if !exists {
 			g = generationState{Baseline: e.state.NextSeq, Acknowledged: e.state.NextSeq, LastSeen: time.Now().UTC()}
