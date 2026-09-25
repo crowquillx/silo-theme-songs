@@ -98,6 +98,28 @@ func TestGETRetryWaitIsCancelable(t *testing.T) {
 	}
 }
 
+func TestSiloCooldownSurvivesNewClient(t *testing.T) {
+	var requests atomic.Int32
+	s := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		requests.Add(1)
+		w.Header().Set("Retry-After", "600")
+		w.WriteHeader(http.StatusTooManyRequests)
+	}))
+	defer s.Close()
+	first, _ := New(s.URL, "key", "primary")
+	if _, err := first.Libraries(context.Background()); err == nil || !strings.Contains(err.Error(), "retry later") {
+		t.Fatalf("first request: %v", err)
+	}
+	second, _ := New(s.URL, "key", "primary")
+	started := time.Now()
+	if _, err := second.Libraries(context.Background()); err == nil || !strings.Contains(err.Error(), "retry later") {
+		t.Fatalf("second request: %v", err)
+	}
+	if requests.Load() != 1 || time.Since(started) > time.Second {
+		t.Fatalf("new client requested during cooldown: calls=%d elapsed=%s", requests.Load(), time.Since(started))
+	}
+}
+
 func TestGETHonorsShortRetryAfter(t *testing.T) {
 	var requests atomic.Int32
 	s := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -114,21 +136,6 @@ func TestGETHonorsShortRetryAfter(t *testing.T) {
 	libs, err := c.Libraries(context.Background())
 	if err != nil || requests.Load() != 2 || len(libs) != 1 || time.Since(started) < 900*time.Millisecond {
 		t.Fatalf("short Retry-After was not honored: requests=%d elapsed=%v err=%v", requests.Load(), time.Since(started), err)
-	}
-}
-
-func TestRetryAfterDelayPreservesRequestedWait(t *testing.T) {
-	if got := siloRetryDelay("5", 100*time.Millisecond); got != 5*time.Second {
-		t.Fatalf("delta=%v", got)
-	}
-	if got := siloRetryDelay("999999999999999999999999", 100*time.Millisecond); got <= 10*time.Second {
-		t.Fatalf("overflowed delta retried early=%v", got)
-	}
-	if got := siloRetryDelay(time.Now().Add(24*time.Hour).UTC().Format(http.TimeFormat), 100*time.Millisecond); got <= 10*time.Second {
-		t.Fatalf("date was shortened=%v", got)
-	}
-	if got := siloRetryDelay("invalid", 100*time.Millisecond); got != 100*time.Millisecond {
-		t.Fatalf("fallback=%v", got)
 	}
 }
 

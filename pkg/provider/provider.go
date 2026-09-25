@@ -15,16 +15,18 @@ import (
 type Code string
 
 const (
-	MissingID        Code = "missing_id"
-	Absent           Code = "absent"
-	Malformed        Code = "malformed"
-	Transient        Code = "transient"
-	UnsafeURL        Code = "unsafe_url"
-	UnavailableMedia Code = "unavailable_media"
-	MissingTool      Code = "missing_tool"
-	ExtractorBroken  Code = "extractor_broken"
-	LimitExceeded    Code = "limit_exceeded"
-	InvalidAudio     Code = "invalid_audio"
+	MissingID              Code = "missing_id"
+	Absent                 Code = "absent"
+	Malformed              Code = "malformed"
+	Transient              Code = "transient"
+	RateLimited            Code = "rate_limited"
+	AuthenticationRequired Code = "authentication_required"
+	UnsafeURL              Code = "unsafe_url"
+	UnavailableMedia       Code = "unavailable_media"
+	MissingTool            Code = "missing_tool"
+	ExtractorBroken        Code = "extractor_broken"
+	LimitExceeded          Code = "limit_exceeded"
+	InvalidAudio           Code = "invalid_audio"
 )
 
 // Error contains no URL, credential, subprocess output, or response body.

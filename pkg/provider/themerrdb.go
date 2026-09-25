@@ -3,13 +3,15 @@ package provider
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"net/url"
-	"strconv"
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/crowquillx/silo-theme-songs/pkg/ratelimit"
 )
 
 const defaultDBURL = "https://app.lizardbyte.dev/ThemerrDB"
@@ -51,6 +53,8 @@ func (d *ThemerrDB) Lookup(ctx context.Context, kind Kind, tmdbID string) (strin
 		return entry.url, nil
 	}
 	d.mu.Unlock()
+	ctx, cancel := context.WithTimeout(ctx, 15*time.Second)
+	defer cancel()
 	base := d.BaseURL
 	if base == "" {
 		base = defaultDBURL
@@ -69,6 +73,7 @@ func (d *ThemerrDB) Lookup(ctx context.Context, kind Kind, tmdbID string) (strin
 		client = &http.Client{Timeout: 10 * time.Second}
 	}
 	copyClient := *client
+	copyClient.Transport = ratelimit.Wrap(client.Transport, ratelimit.ExternalInterval)
 	if copyClient.Timeout == 0 || copyClient.Timeout > 15*time.Second {
 		copyClient.Timeout = 15 * time.Second
 	}
@@ -81,6 +86,7 @@ func (d *ThemerrDB) Lookup(ctx context.Context, kind Kind, tmdbID string) (strin
 		}
 		req, _ := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
 		req.Header.Set("Accept", "application/json")
+		req.Header.Set("User-Agent", ratelimit.UserAgent)
 		resp, e := copyClient.Do(req)
 		if ctx.Err() != nil {
 			if resp != nil {
@@ -90,6 +96,9 @@ func (d *ThemerrDB) Lookup(ctx context.Context, kind Kind, tmdbID string) (strin
 		}
 		if e != nil {
 			code = Transient
+			if errors.Is(e, ratelimit.ErrDeferred) {
+				break
+			}
 		} else {
 			value, code = parseDBResponse(resp)
 			resp.Body.Close()
@@ -97,10 +106,10 @@ func (d *ThemerrDB) Lookup(ctx context.Context, kind Kind, tmdbID string) (strin
 		if code != Transient || attempt == 2 {
 			break
 		}
-		wait := time.Duration(100*(1<<attempt)) * time.Millisecond
-		if resp != nil {
-			wait = retryDelay(resp.Header.Get("Retry-After"), wait)
+		if ratelimit.Waiting(ctx, u) {
+			break
 		}
+		wait := time.Duration(100*(1<<attempt)) * time.Millisecond
 		timer := time.NewTimer(wait)
 		select {
 		case <-ctx.Done():
@@ -188,26 +197,6 @@ func parseDBResponse(resp *http.Response) (string, Code) {
 		return "", Absent
 	}
 	return value, ""
-}
-
-func retryDelay(header string, fallback time.Duration) time.Duration {
-	if n, err := strconv.Atoi(header); err == nil && n >= 0 {
-		if n > 2 {
-			n = 2
-		}
-		return time.Duration(n) * time.Second
-	}
-	if when, err := http.ParseTime(header); err == nil {
-		d := time.Until(when)
-		if d < 0 {
-			return 0
-		}
-		if d > 2*time.Second {
-			return 2 * time.Second
-		}
-		return d
-	}
-	return fallback
 }
 
 func isLoopback(host string) bool { return host == "localhost" || host == "127.0.0.1" || host == "::1" }

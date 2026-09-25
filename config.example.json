@@ -37,6 +37,7 @@
     "allowed_audio_hosts": [],
     "max_bytes": 83886080,
     "timeout_seconds": 300,
-    "assisted_search": false
+    "assisted_search": false,
+    "js_runtime": "deno:/usr/local/bin/deno"
   }
 }

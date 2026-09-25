@@ -10,9 +10,10 @@ import (
 	"net/http"
 	"net/url"
 	"path/filepath"
-	"strconv"
 	"strings"
 	"time"
+
+	"github.com/crowquillx/silo-theme-songs/pkg/ratelimit"
 )
 
 type Library struct {
@@ -103,7 +104,7 @@ func New(base, key, profile string) (*Client, error) {
 	if key == "" || profile == "" {
 		return nil, errors.New("Silo API key and primary profile ID are required")
 	}
-	return &Client{u, key, profile, &http.Client{Timeout: 30 * time.Second, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}}, nil
+	return &Client{u, key, profile, &http.Client{Timeout: 30 * time.Second, Transport: ratelimit.Wrap(nil, ratelimit.SiloInterval), CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}}, nil
 }
 func (c *Client) get(ctx context.Context, route string, q url.Values, out any) error {
 	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
@@ -119,30 +120,25 @@ func (c *Client) get(ctx context.Context, route string, q url.Values, out any) e
 		r.Header.Set("Authorization", "Bearer "+c.key)
 		r.Header.Set("X-Profile-Id", c.profile)
 		r.Header.Set("Accept", "application/json")
+		r.Header.Set("User-Agent", ratelimit.UserAgent)
 		resp, e := c.http.Do(r)
 		if e != nil {
 			if ctx.Err() != nil {
 				return ctx.Err()
 			}
+			if errors.Is(e, ratelimit.ErrDeferred) {
+				return errors.New("Silo read rate limit exceeds remaining request budget; retry later")
+			}
 			return errors.New("Silo request failed")
 		}
 		if resp.StatusCode == http.StatusTooManyRequests || resp.StatusCode == http.StatusServiceUnavailable {
 			status := resp.StatusCode
-			wait := siloRetryDelay(resp.Header.Get("Retry-After"), time.Duration(100*(1<<attempt))*time.Millisecond)
 			resp.Body.Close()
 			if attempt == 2 {
 				return fmt.Errorf("Silo read returned HTTP %d", status)
 			}
-			deadline, _ := ctx.Deadline()
-			if wait >= time.Until(deadline) {
+			if ratelimit.Waiting(ctx, &u) {
 				return fmt.Errorf("Silo read returned HTTP %d; Retry-After exceeds remaining request budget, retry later", status)
-			}
-			timer := time.NewTimer(wait)
-			select {
-			case <-ctx.Done():
-				timer.Stop()
-				return ctx.Err()
-			case <-timer.C:
 			}
 			continue
 		}
@@ -166,31 +162,6 @@ func (c *Client) get(ctx context.Context, route string, q url.Values, out any) e
 	return errors.New("Silo read retries exhausted")
 }
 
-func siloRetryDelay(header string, fallback time.Duration) time.Duration {
-	wait := fallback
-	value := strings.TrimSpace(header)
-	digits := value != ""
-	for _, c := range value {
-		if c < '0' || c > '9' {
-			digits = false
-			break
-		}
-	}
-	if digits {
-		seconds, err := strconv.ParseUint(value, 10, 64)
-		if err != nil || seconds > 10 {
-			wait = 11 * time.Second
-		} else {
-			wait = time.Duration(seconds) * time.Second
-		}
-	} else if at, err := http.ParseTime(value); err == nil {
-		wait = time.Until(at)
-	}
-	if wait < 0 {
-		return 0
-	}
-	return wait
-}
 func pages[T any](ctx context.Context, c *Client, path string, q url.Values, paginated bool) ([]T, error) {
 	if q == nil {
 		q = url.Values{}

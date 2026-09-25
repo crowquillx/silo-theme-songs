@@ -40,7 +40,7 @@ var words = regexp.MustCompile(`[^a-z0-9]+`)
 
 // Search produces candidates only. The caller must persist an explicit operator
 // URL selection before passing any result to Fetch.
-func (d *Downloader) Search(ctx context.Context, o SearchOptions) ([]ReviewCandidate, error) {
+func (d *Downloader) Search(ctx context.Context, o SearchOptions) (_ []ReviewCandidate, resultErr error) {
 	if strings.TrimSpace(o.Title) == "" || len(o.Title) > 300 {
 		return nil, &Error{Malformed, "search title"}
 	}
@@ -58,17 +58,25 @@ func (d *Downloader) Search(ctx context.Context, o SearchOptions) ([]ReviewCandi
 	}
 	ctx, cancel := context.WithTimeout(ctx, 45*time.Second)
 	defer cancel()
-	cmd := exec.Command(d.Tools.YTDLP, "--ignore-config", "--no-cache-dir", "--no-warnings", "--skip-download", "--flat-playlist", "--dump-single-json", "--playlist-end", "8", "--socket-timeout", "10", "--retries", "1", "--", "ytsearch8:"+query)
+	release, err := d.youtubeLimit().acquire(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { release(resultErr) }()
+	args := append(youtubeArgs(), "--skip-download", "--flat-playlist", "--dump-single-json", "--playlist-end", "8", "--socket-timeout", "10", "--", "ytsearch8:"+query)
+	cmd := exec.Command(d.Tools.YTDLP, args...)
 	cmd.Env = []string{"PATH=/usr/bin:/bin", "HOME=/nonexistent", "XDG_CONFIG_HOME=/nonexistent"}
 	var output limitedBuffer
 	output.max = 1 << 20
 	cmd.Stdout = &output
-	cmd.Stderr = &limitedBuffer{max: 4096}
+	stderr := &limitedBuffer{max: 4096}
+	cmd.Stderr = stderr
 	if e := runBounded(ctx, cmd, "", 0); e != nil {
 		if ctx.Err() != nil {
 			return nil, ctx.Err()
 		}
-		return nil, &Error{ExtractorBroken, "candidate search"}
+		output, _ := stderr.snapshot()
+		return nil, extractorError(output)
 	}
 	data, overflow := output.snapshot()
 	if overflow {

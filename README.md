@@ -8,7 +8,7 @@ Add the [Crowquillx plugins catalog](https://raw.githubusercontent.com/crowquill
 
 For a local installation, upload the matching `plugin-linux-amd64` or `plugin-linux-arm64` binary through Silo's plugin upload control. The `.tar.gz` download bundles the binary, manifest, checksums, license notices and configuration guide for manual deployment. Upload the raw binary, not the tarball.
 
-The Silo process must have writable media mounts and persistent plugin state. Install `ffprobe`, `yt-dlp`, and FFmpeg yourself and provide their executable paths. Direct audio URLs need only `ffprobe`. The plugin does not install or update tools, use browser cookies, or require the AnimeThemes plugin.
+The Silo process must have writable media mounts and persistent plugin state. Install `ffprobe`, `yt-dlp`, and FFmpeg yourself and provide their executable paths. YouTube extraction also needs Deno 2.3+ or Node 22+ and the matching `yt-dlp-ejs` scripts. Use a bundled yt-dlp release or install `yt-dlp[default]` in a virtual environment; see the [yt-dlp runtime setup guide](https://github.com/yt-dlp/yt-dlp/wiki/EJS). The plugin supports yt-dlp 2025.11.12 or later; validation used 2026.08.19. Direct audio URLs need only `ffprobe`. The plugin does not install or update tools, use browser cookies, or require the AnimeThemes plugin.
 
 ## Configure
 
@@ -32,6 +32,7 @@ Provider settings:
 | `direct_template` | Explicit alternative to ThemerrDB. Supports `{tmdbId}`, `{tvdbId}` and `{imdbId}`. Missing IDs refuse the lookup. |
 | `allowed_audio_hosts` | Exact HTTPS hosts permitted for direct audio. Redirects must also remain allowed. |
 | `yt_dlp`, `ffmpeg` | Operator-installed executable paths. `ffprobe` is a common setting. |
+| `js_runtime` | `deno[:path]` or `node[:path]`, for example `node:/usr/bin/node`. When omitted, discovers a supported Deno or Node executable. Used only for YouTube extraction. |
 | `max_bytes`, `timeout_seconds` | Download limits, default 80 MiB and five minutes. |
 | `assisted_search` | Optional YouTube candidate search when an exact ID or entry is absent. Defaults to false. Every result requires review. |
 | `search_soundtrack` | Prefer soundtrack themes instead of opening/title music in assisted search. |
@@ -40,6 +41,14 @@ Provider settings:
 ThemerrDB uses `/tv_shows/themoviedb/<id>.json` and `/movies/themoviedb/<id>.json` and reads `youtube_theme_url`. A missing TMDB ID, absent entry, malformed response, transient failure and unavailable video are separate results. Failures never switch silently to another song. Repeated failures across different videos open a temporary extractor circuit breaker. Update the installed tools if they stop working.
 
 Assisted search displays candidate links and reasons on the administrator page. Check the work, year, remake and track identity, then save the chosen URL in `provider.url_overrides` and rerun Preview. A channel name or view count is not identity proof. The plugin never downloads an unreviewed search result, and a transient curated lookup failure does not trigger search.
+
+## Request pacing
+
+YouTube search and downloads share one queue per plugin process, with a ten-second gap between jobs. yt-dlp waits three seconds between metadata requests and five to ten seconds before downloading. It uses one fragment worker and does not retry failed requests internally. A throttling or authentication response pauses the queue for one hour. This follows [yt-dlp’s pacing guidance](https://github.com/yt-dlp/yt-dlp/wiki/Extractors#common-youtube-errors); YouTube does not publish a guaranteed scraping quota.
+
+ThemerrDB and direct audio requests start at most once per second per origin, including redirects. Silo catalog requests start at most twice per second per plugin process. HTTP 429 and 503 responses update a shared cooldown from `Retry-After`, accepting both seconds and HTTP dates without shortening the delay. Exhausted rate-limit reset headers also defer requests. Without a retry header, throttling pauses an origin for at least one minute; temporary failures use bounded backoff. Each request has a deadline and at most three attempts. Long waits defer work instead of sending an early retry.
+
+HTTP cooldowns and YouTube pacing survive configuration changes and new clients within the same process. Restarting the plugin resets this in-memory state. Metadata caches avoid repeated successful and absent lookups. These are conservative plugin limits, not claimed service quotas.
 
 ## Ownership and files
 

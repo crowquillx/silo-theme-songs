@@ -19,6 +19,7 @@ type Options struct {
 	Hosts             []string          `json:"allowed_audio_hosts"`
 	YTDLP             string            `json:"yt_dlp"`
 	FFmpeg            string            `json:"ffmpeg"`
+	JSRuntime         string            `json:"js_runtime"`
 	MaxBytes          int64             `json:"max_bytes"`
 	TimeoutSeconds    int               `json:"timeout_seconds"`
 	Types             []string          `json:"types"`
@@ -45,7 +46,7 @@ func New(c pluginapp.Config) (pluginapp.Provider, error) {
 	if o.MaxBytes < 1 || o.MaxBytes > 512<<20 || o.TimeoutSeconds < 1 || o.TimeoutSeconds > 1200 {
 		return nil, errors.New("invalid download size or time limit")
 	}
-	a := &App{opts: o, resolver: &provider.Resolver{DB: &provider.ThemerrDB{}, AllowedDirectHosts: o.Hosts}, downloader: &provider.Downloader{Tools: provider.ToolPaths{YTDLP: o.YTDLP, FFmpeg: o.FFmpeg, FFprobe: c.FFprobe}, StageParent: c.StateDir, AllowedDirectHosts: o.Hosts, MaxBytes: o.MaxBytes, MaxDuration: time.Duration(o.TimeoutSeconds) * time.Second}}
+	a := &App{opts: o, resolver: &provider.Resolver{DB: &provider.ThemerrDB{}, AllowedDirectHosts: o.Hosts}, downloader: &provider.Downloader{Tools: provider.ToolPaths{YTDLP: o.YTDLP, FFmpeg: o.FFmpeg, FFprobe: c.FFprobe, JSRuntime: o.JSRuntime}, StageParent: c.StateDir, AllowedDirectHosts: o.Hosts, MaxBytes: o.MaxBytes, MaxDuration: time.Duration(o.TimeoutSeconds) * time.Second}}
 	return a, nil
 }
 func (a *App) Select(ctx context.Context, t pluginapp.Target) ([]pluginapp.Candidate, error) {

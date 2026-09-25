@@ -136,14 +136,14 @@ func tools(t *testing.T, ytBody, probeBody string) ToolPaths {
 	yt := script(t, dir, "yt-dlp", "if [ \"$1\" = '--version' ]; then echo 2026.09.01; exit 0; fi\n"+ytBody)
 	ffmpeg := script(t, dir, "ffmpeg", "echo 'ffmpeg version 7.1'\n")
 	probe := script(t, dir, "ffprobe", "if [ \"$1\" = '-version' ]; then echo 'ffprobe version 7.1'; exit 0; fi\n"+probeBody)
-	return ToolPaths{yt, ffmpeg, probe}
+	return ToolPaths{YTDLP: yt, FFmpeg: ffmpeg, FFprobe: probe, JSRuntime: "node:" + script(t, dir, "node", "echo v22.0.0")}
 }
 
 func TestExtractionArgumentsStagingAndAudioProbe(t *testing.T) {
 	stage := t.TempDir()
 	argsFile := filepath.Join(t.TempDir(), "args")
 	ytBody := "printf '%s\\n' \"$@\" > '" + argsFile + "'\nprintf audio > theme.mp3"
-	d := &Downloader{Tools: tools(t, ytBody, "echo '{\"format\":{\"format_name\":\"mp3\"},\"streams\":[{\"codec_type\":\"audio\"}]}'"), StageParent: stage}
+	d := &Downloader{youtube: newYouTubeLimiter(0), Tools: tools(t, ytBody, "echo '{\"format\":{\"format_name\":\"mp3\"},\"streams\":[{\"codec_type\":\"audio\"}]}'"), StageParent: stage}
 	s, err := d.Fetch(context.Background(), Source{URL: "https://youtu.be/abcdefghijk", Origin: "themerrdb", Format: "mp3", Extract: true})
 	if err != nil {
 		t.Fatal(err)
@@ -170,7 +170,7 @@ func TestExtractionArgumentsStagingAndAudioProbe(t *testing.T) {
 
 func TestExtractionRejectsVideoAndCleansStage(t *testing.T) {
 	stage := t.TempDir()
-	d := &Downloader{Tools: tools(t, "printf audio > theme.mp3", "echo '{\"format\":{\"format_name\":\"mp3\"},\"streams\":[{\"codec_type\":\"audio\"},{\"codec_type\":\"video\"}]}'"), StageParent: stage}
+	d := &Downloader{youtube: newYouTubeLimiter(0), Tools: tools(t, "printf audio > theme.mp3", "echo '{\"format\":{\"format_name\":\"mp3\"},\"streams\":[{\"codec_type\":\"audio\"},{\"codec_type\":\"video\"}]}'"), StageParent: stage}
 	_, err := d.Fetch(context.Background(), Source{URL: "https://youtu.be/abcdefghijk", Format: "mp3", Extract: true})
 	if !IsCode(err, InvalidAudio) {
 		t.Fatalf("error=%v", err)
@@ -183,7 +183,7 @@ func TestExtractionRejectsVideoAndCleansStage(t *testing.T) {
 
 func TestProbeRejectsAudioContainerMismatchAndCleansStage(t *testing.T) {
 	stage := t.TempDir()
-	d := &Downloader{Tools: tools(t, "printf audio > theme.mp3", "echo '{\"format\":{\"format_name\":\"ogg\"},\"streams\":[{\"codec_type\":\"audio\"}]}'"), StageParent: stage}
+	d := &Downloader{youtube: newYouTubeLimiter(0), Tools: tools(t, "printf audio > theme.mp3", "echo '{\"format\":{\"format_name\":\"ogg\"},\"streams\":[{\"codec_type\":\"audio\"}]}'"), StageParent: stage}
 	_, err := d.Fetch(context.Background(), Source{URL: "https://youtu.be/abcdefghijk", Format: "mp3", Extract: true})
 	if !IsCode(err, InvalidAudio) {
 		t.Fatalf("mismatched container accepted: %v", err)
@@ -199,7 +199,7 @@ func TestExtractionResolvesFFmpegOnPath(t *testing.T) {
 	toolPaths := tools(t, "printf '%s\\n' \"$@\" > '"+argsFile+"'\nprintf audio > theme.mp3", "echo '{\"format\":{\"format_name\":\"mp3\"},\"streams\":[{\"codec_type\":\"audio\"}]}'")
 	t.Setenv("PATH", filepath.Dir(toolPaths.FFmpeg)+":/usr/bin:/bin")
 	toolPaths.FFmpeg = "ffmpeg"
-	d := &Downloader{Tools: toolPaths, StageParent: t.TempDir()}
+	d := &Downloader{youtube: newYouTubeLimiter(0), Tools: toolPaths, StageParent: t.TempDir()}
 	staged, err := d.Fetch(context.Background(), Source{URL: "https://youtu.be/abcdefghijk", Format: "mp3", Extract: true})
 	if err != nil {
 		t.Fatal(err)
@@ -225,7 +225,7 @@ func TestExtractionBoundsAndUnavailableOutput(t *testing.T) {
 		{"exit 0", 100, UnavailableMedia},
 	} {
 		stage := t.TempDir()
-		d := &Downloader{Tools: tools(t, tc.body, "echo '{\"format\":{\"format_name\":\"mp3\"},\"streams\":[{\"codec_type\":\"audio\"}]}'"), StageParent: stage, MaxBytes: tc.max}
+		d := &Downloader{youtube: newYouTubeLimiter(0), Tools: tools(t, tc.body, "echo '{\"format\":{\"format_name\":\"mp3\"},\"streams\":[{\"codec_type\":\"audio\"}]}'"), StageParent: stage, MaxBytes: tc.max}
 		_, err := d.Fetch(context.Background(), Source{URL: "https://youtu.be/abcdefghijk", Format: "mp3", Extract: true})
 		if !IsCode(err, tc.code) {
 			t.Fatalf("body=%q err=%v", tc.body, err)
@@ -238,7 +238,7 @@ func TestExtractionBoundsAndUnavailableOutput(t *testing.T) {
 }
 
 func TestMissingToolsAndCircuitBreaker(t *testing.T) {
-	d := &Downloader{Tools: ToolPaths{}, StageParent: t.TempDir()}
+	d := &Downloader{youtube: newYouTubeLimiter(0), Tools: ToolPaths{}, StageParent: t.TempDir()}
 	_, err := d.Fetch(context.Background(), Source{URL: "https://youtu.be/abcdefghijk", Format: "mp3", Extract: true})
 	if !IsCode(err, MissingTool) {
 		t.Fatalf("missing tools: %v", err)
@@ -260,7 +260,7 @@ func TestProcessGroupCancellation(t *testing.T) {
 	stage := t.TempDir()
 	marker := filepath.Join(t.TempDir(), "child-finished")
 	ytBody := "(sleep 0.5; touch '" + marker + "') &\nsleep 5"
-	d := &Downloader{Tools: tools(t, ytBody, "echo '{\"format\":{\"format_name\":\"mp3\"},\"streams\":[{\"codec_type\":\"audio\"}]}'"), StageParent: stage}
+	d := &Downloader{youtube: newYouTubeLimiter(0), Tools: tools(t, ytBody, "echo '{\"format\":{\"format_name\":\"mp3\"},\"streams\":[{\"codec_type\":\"audio\"}]}'"), StageParent: stage}
 	ctx, cancel := context.WithTimeout(context.Background(), 150*time.Millisecond)
 	defer cancel()
 	_, err := d.Fetch(ctx, Source{URL: "https://youtu.be/abcdefghijk", Format: "mp3", Extract: true})
@@ -288,7 +288,7 @@ func TestDirectDownloadBoundsAndRedirect(t *testing.T) {
 	client := &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
 		return &http.Response{StatusCode: status, Header: http.Header{"Content-Type": []string{contentType}, "Location": []string{"https://evil.example/out.mp3"}}, Body: io.NopCloser(strings.NewReader(body)), ContentLength: int64(len(body)), Request: req}, nil
 	})}
-	d := &Downloader{Tools: tools(t, "exit 1", "echo '{\"format\":{\"format_name\":\"mp3\"},\"streams\":[{\"codec_type\":\"audio\"}]}'"), StageParent: t.TempDir(), Client: client, AllowedDirectHosts: []string{"audio.example.org"}, MaxBytes: 8}
+	d := &Downloader{youtube: newYouTubeLimiter(0), Tools: tools(t, "exit 1", "echo '{\"format\":{\"format_name\":\"mp3\"},\"streams\":[{\"codec_type\":\"audio\"}]}'"), StageParent: t.TempDir(), Client: client, AllowedDirectHosts: []string{"audio.example.org"}, MaxBytes: 8}
 	s := Source{URL: "https://audio.example.org/theme.mp3", Format: "mp3"}
 	staged, err := d.Fetch(context.Background(), s)
 	if err != nil || staged.Size != 5 {

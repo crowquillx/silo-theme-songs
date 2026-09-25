@@ -17,18 +17,23 @@ import (
 	"sync"
 	"syscall"
 	"time"
+
+	"github.com/crowquillx/silo-theme-songs/pkg/ratelimit"
 )
 
 type ToolPaths struct {
-	YTDLP   string
-	FFmpeg  string
-	FFprobe string
+	YTDLP     string
+	FFmpeg    string
+	FFprobe   string
+	JSRuntime string // deno[:path] or node[:path]; empty discovers a supported runtime
 }
 
 type ToolVersions struct {
-	YTDLP   string
-	FFmpeg  string
-	FFprobe string
+	YTDLP        string
+	FFmpeg       string
+	FFprobe      string
+	JSRuntime    string
+	jsRuntimeArg string
 }
 
 // StagedAudio exists only in a private job directory. The caller must call
@@ -62,6 +67,7 @@ type Downloader struct {
 	mu           sync.Mutex
 	failedVideos map[[32]byte]struct{}
 	brokenUntil  time.Time
+	youtube      *youtubeLimiter // nil uses the process-wide limiter
 }
 
 func (d *Downloader) limits() (int64, time.Duration) {
@@ -97,6 +103,10 @@ func (d *Downloader) Preflight(ctx context.Context, extraction bool) (ToolVersio
 		return versions, err
 	}
 	versions.FFmpeg, err = checkTool(ctx, d.Tools.FFmpeg, "ffmpeg", "-version")
+	if err != nil {
+		return versions, err
+	}
+	versions.jsRuntimeArg, versions.JSRuntime, err = resolveJSRuntime(ctx, d.Tools.JSRuntime)
 	return versions, err
 }
 
@@ -130,12 +140,28 @@ func checkTool(ctx context.Context, path, name, arg string) (string, error) {
 	}
 	first := strings.TrimSpace(strings.SplitN(string(out), "\n", 2)[0])
 	if name == "yt-dlp" {
-		if !regexp.MustCompile(`^20[0-9]{2}\.[0-9]{2}\.[0-9]{2}$`).MatchString(first) || first < "2024.04.09" {
+		if !regexp.MustCompile(`^20[0-9]{2}\.[0-9]{2}\.[0-9]{2}$`).MatchString(first) || first < "2025.11.12" {
 			return "", &Error{MissingTool, name + " version"}
 		}
 		return first, nil
 	}
 	fields := strings.Fields(first)
+	if name == "node" || name == "deno" {
+		version := strings.TrimPrefix(first, "v")
+		if name == "deno" && len(fields) == 2 && fields[0] == "deno" {
+			version = fields[1]
+		}
+		m := regexp.MustCompile(`^([0-9]+)\.([0-9]+)\.[0-9]+$`).FindStringSubmatch(version)
+		if len(m) != 3 {
+			return "", &Error{MissingTool, name + " version"}
+		}
+		major, _ := strconv.Atoi(m[1])
+		minor, _ := strconv.Atoi(m[2])
+		if name == "node" && major < 22 || name == "deno" && (major < 2 || major == 2 && minor < 3) {
+			return "", &Error{MissingTool, name + " version"}
+		}
+		return version, nil
+	}
 	if len(fields) < 3 || fields[0] != name || fields[1] != "version" {
 		return "", &Error{MissingTool, name + " version"}
 	}
@@ -171,7 +197,8 @@ func (d *Downloader) Fetch(ctx context.Context, source Source) (_ *StagedAudio, 
 			return nil, &Error{ExtractorBroken, "circuit open"}
 		}
 	}
-	if _, err := d.Preflight(jobCtx, source.Extract); err != nil {
+	versions, err := d.Preflight(jobCtx, source.Extract)
+	if err != nil {
 		return nil, err
 	}
 	if d.StageParent == "" {
@@ -188,7 +215,7 @@ func (d *Downloader) Fetch(ctx context.Context, source Source) (_ *StagedAudio, 
 	}()
 	var path string
 	if source.Extract {
-		path, err = d.extract(jobCtx, dir, source.URL, max)
+		path, err = d.extract(jobCtx, dir, source.URL, max, versions.jsRuntimeArg)
 		if err != nil {
 			if IsCode(err, UnavailableMedia) {
 				d.recordFailure(source.URL)
@@ -235,7 +262,12 @@ func (d *Downloader) recordFailure(rawURL string) {
 	}
 }
 
-func (d *Downloader) extract(ctx context.Context, dir, raw string, max int64) (string, error) {
+func (d *Downloader) extract(ctx context.Context, dir, raw string, max int64, jsRuntime string) (_ string, resultErr error) {
+	release, err := d.youtubeLimit().acquire(ctx)
+	if err != nil {
+		return "", err
+	}
+	defer func() { release(resultErr) }()
 	path := filepath.Join(dir, "theme.mp3")
 	ffmpegPath, err := exec.LookPath(d.Tools.FFmpeg)
 	if err != nil {
@@ -245,11 +277,15 @@ func (d *Downloader) extract(ctx context.Context, dir, raw string, max int64) (s
 	if err != nil {
 		return "", &Error{MissingTool, "ffmpeg"}
 	}
-	args := []string{"--ignore-config", "--no-config-locations", "--no-plugin-dirs", "--no-playlist", "--use-extractors", "youtube,youtube:tab,end", "--default-search", "error", "--no-cache-dir", "--no-progress", "--no-write-info-json", "--no-write-thumbnail", "--no-write-subs", "--no-write-auto-subs", "--no-mtime", "--retries", "2", "--fragment-retries", "2", "--socket-timeout", "15", "--max-filesize", strconv.FormatInt(max, 10), "--max-downloads", "1", "--match-filters", "!is_live & duration <= 1200", "-f", "bestaudio/best", "-x", "--audio-format", "mp3", "--audio-quality", "192K", "--ffmpeg-location", ffmpegPath, "-o", filepath.Join(dir, "theme.%(ext)s"), "--", raw}
+	args := []string{"--ignore-config", "--no-config-locations", "--no-plugin-dirs", "--no-playlist", "--use-extractors", "youtube,youtube:tab,end", "--default-search", "error", "--no-cache-dir", "--no-progress", "--no-write-info-json", "--no-write-thumbnail", "--no-write-subs", "--no-write-auto-subs", "--no-mtime", "--socket-timeout", "15", "--max-filesize", strconv.FormatInt(max, 10), "--max-downloads", "1", "--match-filters", "!is_live & duration <= 1200", "-f", "bestaudio/best", "-x", "--audio-format", "mp3", "--audio-quality", "192K", "--ffmpeg-location", ffmpegPath, "-o", filepath.Join(dir, "theme.%(ext)s"), "--", raw}
+	args = append(youtubeArgs(), args...)
+	args = append([]string{"--no-js-runtimes", "--js-runtimes", jsRuntime}, args...)
 	cmd := exec.Command(d.Tools.YTDLP, args...)
 	cmd.Dir = dir
 	cmd.Env = []string{"PATH=" + filepath.Dir(ffmpegPath) + ":/usr/bin:/bin", "HOME=" + dir, "XDG_CONFIG_HOME=" + dir, "XDG_CACHE_HOME=" + dir, "TMPDIR=" + dir}
-	if err := runBounded(ctx, cmd, dir, max*2+(1<<20)); err != nil {
+	// --max-downloads 1 returns 101 after a successful download. Accept that
+	// stop only here; Fetch still requires a complete, probed audio-only file.
+	if err := runBounded(ctx, cmd, dir, max*2+(1<<20), 101); err != nil {
 		return "", err
 	}
 	return path, nil
@@ -262,6 +298,7 @@ func (d *Downloader) downloadDirect(ctx context.Context, dir string, source Sour
 		client = &http.Client{Timeout: 30 * time.Second}
 	}
 	copyClient := *client
+	copyClient.Transport = ratelimit.Wrap(client.Transport, ratelimit.ExternalInterval)
 	if copyClient.Timeout == 0 || copyClient.Timeout > 30*time.Second {
 		copyClient.Timeout = 30 * time.Second
 	}
@@ -278,7 +315,7 @@ func (d *Downloader) downloadDirect(ctx context.Context, dir string, source Sour
 	var resp *http.Response
 	for attempt := 0; attempt < 3; attempt++ {
 		req, _ := http.NewRequestWithContext(ctx, http.MethodGet, source.URL, nil)
-		req.Header.Set("User-Agent", "silo-theme-plugins/0.1.0 (https://github.com/crowquillx/silo-theme-songs)")
+		req.Header.Set("User-Agent", ratelimit.UserAgent)
 		req.Header.Set("Accept", "audio/*,application/ogg,application/octet-stream;q=0.8")
 		var requestErr error
 		resp, requestErr = copyClient.Do(req)
@@ -286,7 +323,13 @@ func (d *Downloader) downloadDirect(ctx context.Context, dir string, source Sour
 			return "", &Error{UnsafeURL, "redirect"}
 		}
 		if ctx.Err() != nil {
+			if resp != nil {
+				resp.Body.Close()
+			}
 			return "", ctx.Err()
+		}
+		if errors.Is(requestErr, ratelimit.ErrDeferred) {
+			return "", &Error{Transient, "direct service cooldown; retry later"}
 		}
 		if requestErr == nil && resp.StatusCode == http.StatusOK {
 			break
@@ -300,10 +343,14 @@ func (d *Downloader) downloadDirect(ctx context.Context, dir string, source Sour
 		if attempt == 2 {
 			return "", &Error{Transient, "direct HTTP"}
 		}
-		wait := time.Duration(100*(1<<attempt)) * time.Millisecond
-		if resp != nil {
-			wait = retryDelay(resp.Header.Get("Retry-After"), wait)
+		lastURL := req.URL
+		if resp != nil && resp.Request != nil {
+			lastURL = resp.Request.URL
 		}
+		if ratelimit.Waiting(ctx, lastURL) {
+			return "", &Error{Transient, "direct service cooldown; retry later"}
+		}
+		wait := time.Duration(1<<attempt) * time.Second
 		select {
 		case <-ctx.Done():
 			return "", ctx.Err()
@@ -412,7 +459,7 @@ func maxInt(a, b int) int {
 	return b
 }
 
-func runBounded(ctx context.Context, cmd *exec.Cmd, dir string, maxSize int64) error {
+func runBounded(ctx context.Context, cmd *exec.Cmd, dir string, maxSize int64, acceptedExitCodes ...int) error {
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	var output limitedBuffer
 	output.max = 8 << 10
@@ -442,7 +489,17 @@ func runBounded(ctx context.Context, cmd *exec.Cmd, dir string, maxSize int64) e
 				return &Error{LimitExceeded, "process output"}
 			}
 			if err != nil {
-				return &Error{UnavailableMedia, "extractor"}
+				var exitError *exec.ExitError
+				accepted := false
+				if errors.As(err, &exitError) {
+					for _, code := range acceptedExitCodes {
+						accepted = accepted || exitError.ExitCode() == code
+					}
+				}
+				if !accepted {
+					output, _ := output.snapshot()
+					return extractorError(output)
+				}
 			}
 			if dir != "" && stagedSize(dir) > maxSize {
 				return &Error{LimitExceeded, "staging"}
@@ -500,5 +557,5 @@ func Diagnostic(err error, versions ToolVersions) string {
 	if !errors.As(err, &e) {
 		return "provider_error"
 	}
-	return fmt.Sprintf("%s (%s; yt-dlp=%s ffmpeg=%s ffprobe=%s)", e.Code, e.Op, versions.YTDLP, versions.FFmpeg, versions.FFprobe)
+	return fmt.Sprintf("%s (%s; yt-dlp=%s ffmpeg=%s ffprobe=%s js=%s)", e.Code, e.Op, versions.YTDLP, versions.FFmpeg, versions.FFprobe, versions.JSRuntime)
 }
