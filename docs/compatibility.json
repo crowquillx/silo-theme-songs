@@ -1,7 +1,7 @@
 {
   "sdk_version": "v0.17.0",
   "sdk_commit": "488af9bde662bbbf117ec9b04748753cdf26a00c",
-  "server_contract_commit": "b4990ebaf8b560e2228d4d6d38cf7337c25e3ce7",
+  "server_contract_commit": "7631a19158e9f6f0afa8a55ce67dc8a787e56d78",
   "owner_protocol": 1,
   "platforms": [
     "linux/amd64",
