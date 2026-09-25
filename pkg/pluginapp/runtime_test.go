@@ -35,7 +35,7 @@ func (f *fakeProvider) Select(context.Context, Target) ([]Candidate, error) {
 }
 func (f *fakeProvider) Fetch(context.Context, Candidate) (*provider.StagedAudio, error) {
 	f.calls.Add(1)
-	return &provider.StagedAudio{Path: f.staged, Format: "ogg"}, nil
+	return &provider.StagedAudio{Path: f.staged, Format: "mp3"}, nil
 }
 
 func TestAutoscanHandshakePublicationAndExactDiscovery(t *testing.T) {
@@ -75,8 +75,8 @@ func TestAutoscanHandshakePublicationAndExactDiscovery(t *testing.T) {
 				entries, _ := os.ReadDir(filepath.Join(owner, "theme-music"))
 				var title string
 				for _, f := range entries {
-					if strings.HasSuffix(f.Name(), ".ogg") {
-						title = strings.TrimSuffix(f.Name(), ".ogg")
+					if strings.HasSuffix(f.Name(), ".mp3") {
+						title = strings.TrimSuffix(f.Name(), ".mp3")
 					}
 				}
 				v["themes"] = map[string]any{"owner_id": "movie:fixture", "items": []any{map[string]string{"title": title, "id": "1"}}}
@@ -127,6 +127,11 @@ func TestAutoscanHandshakePublicationAndExactDiscovery(t *testing.T) {
 	r = s.Execute(ctx, "sync")
 	if r.Downloaded != 1 {
 		t.Fatalf("publication failed: %+v", r)
+	}
+	// The source candidate is Ogg, but publication must use the staged MP3
+	// extension so the scanner and later discovery agree on the actual file.
+	if records := s.engine.Records(); len(records) != 1 || !strings.HasSuffix(records[0].Filename, ".mp3") {
+		t.Fatalf("converted audio published with wrong extension: %+v", records)
 	}
 	batch, e := s.PollChanges(ctx, &pluginv1.PollChangesRequest{CapabilityId: "themes", Marker: ready.NextMarker})
 	if e != nil || len(batch.Changes) != 1 || batch.Changes[0].SourcePath != owner {

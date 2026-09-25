@@ -38,6 +38,7 @@ type ToolVersions struct {
 
 // StagedAudio exists only in a private job directory. The caller must call
 // Close after its own validated no-clobber publication, including on errors.
+// Fetch returns validated MP3 audio, regardless of the source container.
 type StagedAudio struct {
 	Path   string
 	Format string
@@ -88,21 +89,23 @@ func (d *Downloader) limits() (int64, time.Duration) {
 	return max, duration
 }
 
-func (d *Downloader) Preflight(ctx context.Context, extraction bool) (ToolVersions, error) {
+func (d *Downloader) Preflight(ctx context.Context, source Source) (ToolVersions, error) {
 	var versions ToolVersions
 	var err error
 	versions.FFprobe, err = checkTool(ctx, d.Tools.FFprobe, "ffprobe", "-version")
 	if err != nil {
 		return versions, err
 	}
-	if !extraction {
+	if source.Extract || source.Format != "mp3" {
+		versions.FFmpeg, err = checkTool(ctx, d.Tools.FFmpeg, "ffmpeg", "-version")
+		if err != nil {
+			return versions, err
+		}
+	}
+	if !source.Extract {
 		return versions, nil
 	}
 	versions.YTDLP, err = checkTool(ctx, d.Tools.YTDLP, "yt-dlp", "--version")
-	if err != nil {
-		return versions, err
-	}
-	versions.FFmpeg, err = checkTool(ctx, d.Tools.FFmpeg, "ffmpeg", "-version")
 	if err != nil {
 		return versions, err
 	}
@@ -197,7 +200,7 @@ func (d *Downloader) Fetch(ctx context.Context, source Source) (_ *StagedAudio, 
 			return nil, &Error{ExtractorBroken, "circuit open"}
 		}
 	}
-	versions, err := d.Preflight(jobCtx, source.Extract)
+	versions, err := d.Preflight(jobCtx, source)
 	if err != nil {
 		return nil, err
 	}
@@ -238,8 +241,25 @@ func (d *Downloader) Fetch(ctx context.Context, source Source) (_ *StagedAudio, 
 	if info.Size() > max {
 		return nil, &Error{LimitExceeded, "staged size"}
 	}
-	if err := d.probe(jobCtx, path, source.Format); err != nil {
+	audio, err := d.probe(jobCtx, path, source.Format)
+	if err != nil {
 		return nil, err
+	}
+	if source.Format != "mp3" {
+		path, err = d.convertMP3(jobCtx, dir, path, audio, max)
+		if err != nil {
+			return nil, err
+		}
+		info, err = os.Lstat(path)
+		if err != nil || !info.Mode().IsRegular() || info.Size() == 0 {
+			return nil, &Error{InvalidAudio, "converted file"}
+		}
+		if info.Size() > max {
+			return nil, &Error{LimitExceeded, "converted size"}
+		}
+		if _, err := d.probe(jobCtx, path, "mp3"); err != nil {
+			return nil, err
+		}
 	}
 	if source.Extract {
 		d.mu.Lock()
@@ -247,7 +267,7 @@ func (d *Downloader) Fetch(ctx context.Context, source Source) (_ *StagedAudio, 
 		d.brokenUntil = time.Time{}
 		d.mu.Unlock()
 	}
-	return &StagedAudio{Path: path, Format: source.Format, Size: info.Size(), dir: dir}, nil
+	return &StagedAudio{Path: path, Format: "mp3", Size: info.Size(), dir: dir}, nil
 }
 
 func (d *Downloader) recordFailure(rawURL string) {
@@ -385,8 +405,15 @@ func (d *Downloader) downloadDirect(ctx context.Context, dir string, source Sour
 	return path, nil
 }
 
-func (d *Downloader) probe(ctx context.Context, path, format string) error {
-	cmd := exec.Command(d.Tools.FFprobe, "-v", "error", "-protocol_whitelist", "file,pipe", "-max_alloc", "67108864", "-probesize", "10000000", "-analyzeduration", "10000000", "-show_entries", "stream=codec_type:format=format_name", "-of", "json", "--", path)
+type audioStream struct {
+	CodecType string `json:"codec_type"`
+	CodecName string `json:"codec_name"`
+	Channels  int    `json:"channels"`
+}
+
+func (d *Downloader) probe(ctx context.Context, path, format string) (audioStream, error) {
+	var first audioStream
+	cmd := exec.Command(d.Tools.FFprobe, "-v", "error", "-protocol_whitelist", "file,pipe", "-max_alloc", "67108864", "-probesize", "10000000", "-analyzeduration", "10000000", "-show_entries", "stream=codec_type,codec_name,channels:format=format_name", "-of", "json", "--", path)
 	cmd.Env = []string{"PATH=/usr/bin:/bin", "HOME=/nonexistent"}
 	var output limitedBuffer
 	output.max = 16 << 10
@@ -394,39 +421,72 @@ func (d *Downloader) probe(ctx context.Context, path, format string) error {
 	cmd.Stderr = &limitedBuffer{max: 1024}
 	if err := runBounded(ctx, cmd, "", 0); err != nil {
 		if ctx.Err() != nil {
-			return ctx.Err()
+			return first, ctx.Err()
 		}
-		return &Error{InvalidAudio, "ffprobe"}
+		return first, &Error{InvalidAudio, "ffprobe"}
 	}
 	var data struct {
 		Format struct {
 			Name string `json:"format_name"`
 		} `json:"format"`
-		Streams []struct {
-			CodecType string `json:"codec_type"`
-		} `json:"streams"`
+		Streams []audioStream `json:"streams"`
 	}
 	buf, overflow := output.snapshot()
 	if overflow || json.Unmarshal(buf, &data) != nil {
-		return &Error{InvalidAudio, "ffprobe output"}
+		return first, &Error{InvalidAudio, "ffprobe output"}
 	}
 	audio := 0
 	for _, s := range data.Streams {
 		if s.CodecType == "video" {
-			return &Error{InvalidAudio, "video stream"}
+			return first, &Error{InvalidAudio, "video stream"}
 		}
 		if s.CodecType == "audio" {
+			if audio == 0 {
+				first = s
+			}
 			audio++
 		}
 	}
-	if audio == 0 {
-		return &Error{InvalidAudio, "no audio stream"}
+	if audio == 0 || first.CodecName == "" || first.Channels < 1 {
+		return first, &Error{InvalidAudio, "no valid audio stream"}
 	}
 	expected := map[string]string{"mp3": "mp3", "m4a": "mov,mp4,m4a,3gp,3g2,mj2", "m4b": "mov,mp4,m4a,3gp,3g2,mj2", "ogg": "ogg", "opus": "ogg", "flac": "flac", "wav": "wav", "aac": "aac"}[format]
 	if expected == "" || data.Format.Name != expected {
-		return &Error{InvalidAudio, "format does not match extension"}
+		return first, &Error{InvalidAudio, "format does not match extension"}
 	}
-	return nil
+	if format == "mp3" && (audio != 1 || first.CodecName != "mp3") {
+		return first, &Error{InvalidAudio, "not MP3 audio"}
+	}
+	return first, nil
+}
+
+// convertMP3 reads only the validated local file. Input and output each have
+// their own size bound; the same job deadline covers download and conversion.
+func (d *Downloader) convertMP3(ctx context.Context, dir, input string, audio audioStream, max int64) (string, error) {
+	outDir := filepath.Join(dir, "converted")
+	if err := os.Mkdir(outDir, 0700); err != nil {
+		return "", &Error{Transient, "conversion staging"}
+	}
+	output := filepath.Join(outDir, "theme.mp3")
+	args := []string{"-nostdin", "-hide_banner", "-loglevel", "error", "-xerror", "-n", "-protocol_whitelist", "file,pipe", "-max_alloc", "67108864", "-probesize", "10000000", "-analyzeduration", "10000000", "-i", input, "-map", "0:a:0", "-vn", "-sn", "-dn", "-map_metadata", "-1", "-map_chapters", "-1"}
+	if audio.CodecName == "mp3" {
+		args = append(args, "-c:a", "copy")
+	} else {
+		args = append(args, "-c:a", "libmp3lame", "-b:a", "192k", "-ar", "44100", "-ac", strconv.Itoa(min(audio.Channels, 2)), "-threads", "1")
+	}
+	args = append(args, "-f", "mp3", output)
+	cmd := exec.Command(d.Tools.FFmpeg, args...)
+	cmd.Env = []string{"PATH=/usr/bin:/bin", "HOME=/nonexistent"}
+	if err := runBounded(ctx, cmd, outDir, max); err != nil {
+		if ctx.Err() != nil {
+			return "", ctx.Err()
+		}
+		if IsCode(err, LimitExceeded) || IsCode(err, MissingTool) {
+			return "", err
+		}
+		return "", &Error{InvalidAudio, "MP3 conversion"}
+	}
+	return output, nil
 }
 
 type limitedBuffer struct {

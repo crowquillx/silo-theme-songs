@@ -1,6 +1,6 @@
 {
   "plugin_id": "dev.crowquillx.theme-songs",
-  "version": "0.1.4",
+  "version": "0.1.5",
   "checksum": "__CHECKSUM__",
   "silo_api_version": "v1",
   "supported_platforms": [
@@ -16,8 +16,8 @@
   "presentation": {
     "display_name": "Theme Songs",
     "summary": "Downloads movie and series theme audio from exact ThemerrDB matches and selected URLs.",
-    "description_markdown": "Downloads movie and series theme audio from exact ThemerrDB matches and selected URLs. Preview ownership and source choices before downloading. Existing audio is preserved.",
-    "setup_markdown": "Configure the Silo URL, a dedicated administrator API key and primary profile, writable mounts, selected libraries, and persistent state. Keep preview only enabled for the first task run. Enable this plugin's themes Autoscan source with identity path rewrites, or select manual scans. Run preview, review destinations, then enable downloads. The README contains configuration examples.",
+    "description_markdown": "Downloads movie and series theme audio from exact ThemerrDB matches and selected URLs. Preview ownership and source choices before downloading. Existing audio is preserved. New downloads are saved as MP3. Non-MP3 sources require FFmpeg with libmp3lame; existing MP3 audio is kept without re-encoding.",
+    "setup_markdown": "Configure the Silo URL, a dedicated administrator API key and primary profile, writable mounts, selected libraries, and persistent state. Keep preview only enabled for the first task run. Enable this plugin's themes Autoscan source with identity path rewrites, or select manual scans. Run preview, review destinations, then enable downloads. The README contains configuration examples. Install ffprobe and FFmpeg with libmp3lame in the plugin environment. Set provider.ffmpeg if FFmpeg is not on PATH.",
     "homepage_url": "https://github.com/crowquillx/silo-theme-songs",
     "source_url": "https://github.com/crowquillx/silo-theme-songs",
     "support_url": "https://github.com/crowquillx/silo-theme-songs/issues",

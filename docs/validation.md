@@ -19,3 +19,9 @@ Rate-limit regressions cover concurrent pacing, newly configured clients, full R
 Live mapping snapshots were reachable. The AnimeThemes API/audio service was unavailable during validation, so a live AnimeThemes download could not be verified. Its mapping, selection and failure behavior passed fixture tests. The live direct-audio test verifies the shared downloader and writer, not AnimeThemes asset availability.
 
 The experimental TelevisionTunes source is disabled. Its TLS certificate failed the live probe; TLS verification is never bypassed.
+
+## MP3 output in v0.1.5
+
+The shared downloader passes real FFmpeg conversion and full decode checks for Ogg/Vorbis, Opus, FLAC, WAV, AAC, M4A and M4B sources, including mono and multichannel inputs. MP3 sources remain byte-identical. MP3 packets in a WAV container are copied without re-encoding. The AnimeThemes adapter also passes a generated Ogg-to-MP3 download test. CI and release jobs require these codec tools.
+
+Regression tests cover missing conversion tools before a download, failed and oversized conversion, invalid output, cancellation with child-process cleanup, and publication with the converted extension. The existing publication/discovery test starts with an Ogg candidate, publishes an MP3, confirms discovery and avoids another download on repeated runs. Previously managed files keep their format and source identity.

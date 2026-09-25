@@ -82,6 +82,6 @@ func (a *App) Fetch(ctx context.Context, c pluginapp.Candidate) (*provider.Stage
 	return a.downloader.Fetch(ctx, provider.Source{URL: c.URL, Format: c.Extension, Origin: c.Provenance, Extract: c.Extract})
 }
 func (a *App) Preflight(ctx context.Context, c pluginapp.Candidate) error {
-	_, e := a.downloader.Preflight(ctx, c.Extract)
+	_, e := a.downloader.Preflight(ctx, provider.Source{Format: c.Extension, Extract: c.Extract})
 	return e
 }

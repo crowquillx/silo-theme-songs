@@ -19,7 +19,7 @@ func TestExtractionAcceptsDownloadLimitExitOnlyWithValidAudio(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			stage := t.TempDir()
-			d := &Downloader{youtube: newYouTubeLimiter(0), Tools: tools(t, tc.body, `echo '{"format":{"format_name":"mp3"},"streams":[{"codec_type":"audio"}]}'`), StageParent: stage}
+			d := &Downloader{youtube: newYouTubeLimiter(0), Tools: tools(t, tc.body, `echo '{"format":{"format_name":"mp3"},"streams":[{"codec_type":"audio","codec_name":"mp3","channels":2}]}'`), StageParent: stage}
 			audio, err := d.Fetch(context.Background(), Source{URL: "https://youtu.be/abcdefghijk", Format: "mp3", Extract: true})
 			if tc.want == "" {
 				if err != nil {

@@ -8,7 +8,7 @@ Add the [Crowquillx plugins catalog](https://raw.githubusercontent.com/crowquill
 
 For a local installation, upload the matching `plugin-linux-amd64` or `plugin-linux-arm64` binary through Silo's plugin upload control. The `.tar.gz` download bundles the binary, manifest, checksums, license notices and configuration guide for manual deployment. Upload the raw binary, not the tarball.
 
-The Silo process must have writable media mounts and persistent plugin state. Install `ffprobe`, `yt-dlp`, and FFmpeg yourself and provide their executable paths. YouTube extraction also needs Deno 2.3+ or Node 22+ and the matching `yt-dlp-ejs` scripts. Use a bundled yt-dlp release or install `yt-dlp[default]` in a virtual environment; see the [yt-dlp runtime setup guide](https://github.com/yt-dlp/yt-dlp/wiki/EJS). The plugin supports yt-dlp 2025.11.12 or later; validation used 2026.08.19. Direct audio URLs need only `ffprobe`. The plugin does not install or update tools, use browser cookies, or require the AnimeThemes plugin.
+The Silo process must have writable media mounts and persistent plugin state. Install `ffprobe`, `yt-dlp`, and FFmpeg yourself and provide their executable paths. YouTube extraction also needs Deno 2.3+ or Node 22+ and the matching `yt-dlp-ejs` scripts. Use a bundled yt-dlp release or install `yt-dlp[default]` in a virtual environment; see the [yt-dlp runtime setup guide](https://github.com/yt-dlp/yt-dlp/wiki/EJS). The plugin supports yt-dlp 2025.11.12 or later; validation used 2026.08.19. Direct MP3 URLs need only `ffprobe`. Other direct audio formats also need FFmpeg 4.4+ with the `libmp3lame` encoder; set `provider.ffmpeg` to its executable path if it is not on PATH. The plugin does not install or update tools, use browser cookies, or require the AnimeThemes plugin.
 
 ## Configure
 
@@ -33,7 +33,7 @@ Provider settings:
 | `allowed_audio_hosts` | Exact HTTPS hosts permitted for direct audio. Redirects must also remain allowed. |
 | `yt_dlp`, `ffmpeg` | Operator-installed executable paths. `ffprobe` is a common setting. |
 | `js_runtime` | `deno[:path]` or `node[:path]`, for example `node:/usr/bin/node`. When omitted, discovers a supported Deno or Node executable. Used only for YouTube extraction. |
-| `max_bytes`, `timeout_seconds` | Download limits, default 80 MiB and five minutes. |
+| `max_bytes`, `timeout_seconds` | Input and output size limit and total download/conversion deadline, default 80 MiB per file and five minutes. |
 | `assisted_search` | Optional YouTube candidate search when an exact ID or entry is absent. Defaults to false. Every result requires review. |
 | `search_soundtrack` | Prefer soundtrack themes instead of opening/title music in assisted search. |
 | `allow_covers`, `allow_instrumental` | Explicit search opt-ins. Both default to false. |
@@ -56,7 +56,9 @@ Supported automatic layouts are a dedicated movie folder with one or more versio
 
 Destination overrides use `library_id/item_id/season/copy_root` keys and absolute server-path values. Use season `-1` for a series or movie destination. Overrides still pass inventory and on-disk ownership checks. They cannot make a mixed-season folder own one season's themes.
 
-Files live directly under `OWNER/theme-music/`. Both plugins use protocol 1 sidecars named `.silo-theme-download.lock` and `.silo-theme-download-owner.json`. Keep them in place. One downloader installation per plugin is supported. Independent clustered writers and filesystems without reliable advisory locks are unsupported.
+New downloads are saved as MP3 directly under `OWNER/theme-music/`. Non-MP3 audio is converted locally to 192 kbps MP3 at 44.1 kHz, preserving mono or stereo and downmixing larger channel layouts to stereo. Existing MP3 files pass through byte-for-byte; MP3 audio in another supported container is repackaged without re-encoding. Conversion stays within the job deadline and applies the size limit separately to input and output. Only validated audio-only output is published. Previously downloaded files keep their original format; upgrades do not replace or duplicate them.
+
+Both plugins use protocol 1 sidecars named `.silo-theme-download.lock` and `.silo-theme-download-owner.json`. Keep them in place. One downloader installation per plugin is supported. Independent clustered writers and filesystems without reliable advisory locks are unsupported.
 
 Publication uses a temporary file on the destination filesystem, an audio-only probe, a durable intent and an atomic no-clobber link. Root `theme.*` files and unowned audio are preserved. A checksum mismatch protects an edited managed file. Changed selections do not delete old audio. A new owner receives at most one theme before exact discovery succeeds.
 
@@ -64,7 +66,7 @@ The state directory contains download records, checksums and the scan journal. K
 
 ## Build and test
 
-Requires Go 1.26.0 or later. The SDK is pinned to v0.17.0. The API contract pin is in [docs/compatibility.json](docs/compatibility.json).
+Requires Go 1.26.0 or later. Install FFmpeg with libmp3lame, libvorbis and libopus plus ffprobe for the real codec tests. Set `SILO_REQUIRE_FFMPEG=1` to fail instead of skipping when tools are absent. The SDK is pinned to v0.17.0. The API contract pin is in [docs/compatibility.json](docs/compatibility.json).
 
 ```sh
 go test -race ./...

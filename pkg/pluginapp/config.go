@@ -61,7 +61,7 @@ type Candidate struct {
 	ID         string `json:"id"`
 	Title      string `json:"title"`
 	URL        string `json:"-"`
-	Extension  string `json:"extension"`
+	Extension  string `json:"extension"` // Source format; Fetch returns the normalized output format.
 	Provenance string `json:"provenance"`
 	Extract    bool   `json:"extract"`
 }

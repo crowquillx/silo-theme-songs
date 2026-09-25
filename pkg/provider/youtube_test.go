@@ -12,8 +12,8 @@ import (
 
 func TestJavaScriptRuntimePreflightAndArguments(t *testing.T) {
 	argsPath := filepath.Join(t.TempDir(), "args")
-	d := &Downloader{youtube: newYouTubeLimiter(0), Tools: tools(t, "printf '%s\\n' \"$@\" > '"+argsPath+"'; printf audio > theme.mp3; exit 101", `echo '{"format":{"format_name":"mp3"},"streams":[{"codec_type":"audio"}]}'`), StageParent: t.TempDir()}
-	v, err := d.Preflight(context.Background(), true)
+	d := &Downloader{youtube: newYouTubeLimiter(0), Tools: tools(t, "printf '%s\\n' \"$@\" > '"+argsPath+"'; printf audio > theme.mp3; exit 101", `echo '{"format":{"format_name":"mp3"},"streams":[{"codec_type":"audio","codec_name":"mp3","channels":2}]}'`), StageParent: t.TempDir()}
+	v, err := d.Preflight(context.Background(), Source{Format: "mp3", Extract: true})
 	if err != nil || v.JSRuntime != "node 22.0.0" {
 		t.Fatalf("runtime preflight: %+v %v", v, err)
 	}
@@ -33,11 +33,11 @@ func TestJavaScriptRuntimePreflightAndArguments(t *testing.T) {
 	}
 	for _, spec := range []string{"node:" + script(t, t.TempDir(), "old-node", "echo v20.19.0"), "deno:" + script(t, t.TempDir(), "old-deno", "echo 'deno 2.2.0'"), "node:/nonexistent/runtime", "bun"} {
 		d.Tools.JSRuntime = spec
-		if _, err := d.Preflight(context.Background(), true); !IsCode(err, MissingTool) {
+		if _, err := d.Preflight(context.Background(), Source{Format: "mp3", Extract: true}); !IsCode(err, MissingTool) {
 			t.Fatalf("accepted unsupported runtime %s: %v", spec, err)
 		}
 		// Direct audio never acquires a JavaScript or extraction dependency.
-		if _, err := d.Preflight(context.Background(), false); err != nil {
+		if _, err := d.Preflight(context.Background(), Source{Format: "mp3"}); err != nil {
 			t.Fatal(err)
 		}
 	}

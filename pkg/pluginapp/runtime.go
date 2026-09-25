@@ -463,7 +463,6 @@ func (s *Server) Execute(ctx context.Context, mode string) (report Report) {
 							report.add(r)
 							continue
 						}
-						filename := filename(s.name, candidate)
 						stableID := sourceID(candidate)
 						if !s.anime && changedSelection(store.Records(), dest, stableID) {
 							r.Action = "selection_changed"
@@ -519,7 +518,13 @@ func (s *Server) Execute(ctx context.Context, mode string) (report Report) {
 							report.add(r)
 							continue
 						}
-						_, err = store.Publish(ctx, dest, stableID, filename, staged.Path, func(ctx context.Context) error { return revalidate(ctx, api, c, dest) })
+						if staged.Format != "mp3" {
+							err = errors.New("provider did not produce MP3 audio")
+						} else {
+							output := candidate
+							output.Extension = staged.Format
+							_, err = store.Publish(ctx, dest, stableID, filename(s.name, output), staged.Path, func(ctx context.Context) error { return revalidate(ctx, api, c, dest) })
+						}
 						if closeErr := staged.Close(); closeErr != nil {
 							report.Errors = append(report.Errors, closeErr.Error())
 						}
