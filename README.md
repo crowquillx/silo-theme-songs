@@ -8,7 +8,7 @@ Add the [Crowquillx plugins catalog](https://raw.githubusercontent.com/crowquill
 
 For a local installation, upload the matching `plugin-linux-amd64` or `plugin-linux-arm64` binary through Silo's plugin upload control. The `.tar.gz` download bundles the binary, manifest, checksums, license notices and configuration guide for manual deployment. Upload the raw binary, not the tarball.
 
-The Silo process must have writable media mounts and persistent plugin state. Install `ffprobe`, `yt-dlp`, and FFmpeg yourself and provide their executable paths. YouTube extraction also needs Deno 2.3+ or Node 22+ and the matching `yt-dlp-ejs` scripts. Use a bundled yt-dlp release or install `yt-dlp[default]` in a virtual environment; see the [yt-dlp runtime setup guide](https://github.com/yt-dlp/yt-dlp/wiki/EJS). The plugin supports yt-dlp 2025.11.12 or later; validation used 2026.08.19. Direct MP3 URLs need only `ffprobe`. Other direct audio formats also need FFmpeg 4.4+ with the `libmp3lame` encoder; set `provider.ffmpeg` to its executable path if it is not on PATH. The plugin does not install or update tools, use browser cookies, or require the AnimeThemes plugin.
+The Silo process must have writable media mounts and persistent plugin state. Provide the executable paths for `ffprobe`, `yt-dlp` and FFmpeg. Silo's standard Docker image already includes FFmpeg and ffprobe; see [Update provider settings](#update-provider-settings) for their paths. Install yt-dlp separately for YouTube sources. YouTube extraction also needs Deno 2.3+ or Node 22+ and the matching `yt-dlp-ejs` scripts. Use a bundled yt-dlp release or install `yt-dlp[default]` in a virtual environment; see the [yt-dlp runtime setup guide](https://github.com/yt-dlp/yt-dlp/wiki/EJS). The plugin supports yt-dlp 2025.11.12 or later; validation used 2026.08.19. Direct MP3 URLs need only `ffprobe`. Other direct audio formats also need FFmpeg 4.4+ with the `libmp3lame` encoder; set `provider.ffmpeg` to its executable path if it is not on PATH. The plugin does not install or update tools, use browser cookies, or require the AnimeThemes plugin.
 
 ## Configure
 
@@ -23,7 +23,39 @@ Use [config.example.json](config.example.json) as the reference for the `setting
 
 If Autoscan is unavailable, set `manual_refresh` to true. Run a library scan yourself after downloading, then run Reconcile. A downloaded file remains unconfirmed until the native theme set contains its unique filename-derived title under the expected owner.
 
-Provider settings:
+## Update provider settings
+
+1. Open **Administration → Plugins → Installed**. On **Theme Songs**, select the **Plugin settings** gear or **Configure** button.
+2. Expand **Global Configuration** and find the plugin's settings form.
+3. For Silo's standard Docker image, set **ffprobe executable** to `/usr/lib/jellyfin-ffmpeg/ffprobe`.
+4. In **Provider settings (JSON)**, add or update the `"ffmpeg"` entry to `"/usr/lib/jellyfin-ffmpeg/ffmpeg"`. Edit the existing JSON object and preserve your other entries, including `yt_dlp`, `js_runtime`, `url_overrides` and `allowed_audio_hosts`.
+5. Select **Save config**, wait for it to succeed, then reopen the form to confirm the saved values.
+6. Run the plugin's **Preview** task and check its administrator status page for prerequisite failures before running **Download**.
+
+If **Provider settings (JSON)** is empty, this is a valid minimal value:
+
+```json
+{
+  "ffmpeg": "/usr/lib/jellyfin-ffmpeg/ffmpeg"
+}
+```
+
+That field contains the provider object itself. Use `"ffmpeg"` as the key inside it; do not wrap it in another `"provider"` object or use `"provider.ffmpeg"` as a literal key. `ffprobe` belongs in its separate **ffprobe executable** field. JSON requires double quotes and no trailing commas or comments.
+
+When editing the full `settings` JSON or a CLI configuration file, merge the same values at these locations while retaining the rest of your configuration:
+
+```json
+{
+  "ffprobe": "/usr/lib/jellyfin-ffmpeg/ffprobe",
+  "provider": {
+    "ffmpeg": "/usr/lib/jellyfin-ffmpeg/ffmpeg"
+  }
+}
+```
+
+This is a configuration fragment, not a complete replacement for [config.example.json](config.example.json). Paths must exist inside the Silo container or whichever environment runs the plugin. Silo's standard Docker image includes these Jellyfin-packaged tools, but their directory may be absent from `PATH`. For other installations, use the actual installed paths. Each plugin saves its own settings, so repeat these steps for both plugins when both are installed.
+
+## Provider options
 
 | Field | Meaning |
 | --- | --- |
