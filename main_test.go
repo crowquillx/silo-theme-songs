@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	pluginv1 "github.com/Silo-Server/silo-plugin-sdk/pkg/pluginproto/silo/plugin/v1"
 	"github.com/Silo-Server/silo-plugin-sdk/pkg/pluginsdk/config"
+	"github.com/Silo-Server/silo-plugin-sdk/pkg/pluginsdk/manifest"
 	"google.golang.org/protobuf/encoding/protojson"
 	"testing"
 )
@@ -35,6 +36,13 @@ func TestManifestAcceptsFormText(t *testing.T) {
 	}
 	native := map[string]any{"api_key": "key", "library_ids": []any{"3"}, "destinations": map[string]any{"allowed_roots": []any{"/media"}}}
 	if err := config.ValidateManifestGlobalValue(&m, "settings", native); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// The binary validates its embedded manifest at startup and exits if it fails.
+func TestEmbeddedManifestLoads(t *testing.T) {
+	if _, err := manifest.LoadWithChecksum(manifestJSON, version); err != nil {
 		t.Fatal(err)
 	}
 }
