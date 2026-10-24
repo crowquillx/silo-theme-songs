@@ -221,3 +221,24 @@ func TestSymlinkedCatalogMediaIsAllowed(t *testing.T) {
 		t.Fatal("accepted a dangling catalog symlink")
 	}
 }
+func TestSpecialsFolderIsSeasonZero(t *testing.T) {
+	p, inv, item := fixture(t)
+	show := filepath.Dir(filepath.Dir(inv.Files[0].Path))
+	path := filepath.Join(show, "Specials", "s0.mkv")
+	if e := os.MkdirAll(filepath.Dir(path), 0755); e != nil {
+		t.Fatal(e)
+	}
+	os.WriteFile(path, []byte("video"), 0644)
+	inv.Files = append(inv.Files, siloapi.Membership{File: siloapi.File{ID: "s0", LibraryID: "1", Path: path, ObservedRoot: show}, ItemID: "show", Kind: "series", Season: 0, SeasonID: "s0"})
+	d, e := p.Resolve(inv, item, &siloapi.Season{ID: "s0", Number: 0})
+	if e != nil || len(d) != 1 || filepath.Base(d[0].LocalPath) != "Specials" {
+		t.Fatalf("specials: %+v %v", d, e)
+	}
+	if d, e := p.Resolve(inv, item, &siloapi.Season{ID: "s2", Number: 2}); e != nil || len(d) != 1 {
+		t.Fatalf("specials blocked other seasons: %v", e)
+	}
+	inv.Files[len(inv.Files)-1].Season = 3
+	if _, e := p.Resolve(inv, item, nil); e == nil {
+		t.Fatal("accepted a Specials folder assigned to season 3")
+	}
+}

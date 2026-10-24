@@ -43,3 +43,7 @@ The previous Deno check expected `deno X.Y.Z`, but Deno 2 prints `deno 2.9.8 (st
 On the same server, a configuration with only an API key and two library IDs listed all 62 movies and series. The default profile, internal URL, state directory and library roots resolved inside Silo's container. Preview installed the managed tools there and planned one YouTube download. A Download run then reached YouTube and reported that the video had been removed. No file was written.
 
 Fixture tests cover signature rejection, checksum mismatch, links and escaping paths in archives, an unrecognized release version, daily checks, early checks after failures, keeping the installed copy while GitHub is unreachable and pruning old versions. A test also verifies the real 2026.10.21 checksum signature against the embedded key.
+
+## Specials and Silo pacing in v0.1.10
+
+A hosted AnimeThemes preview of an 876-series library took about 45 minutes at two Silo requests per second. At eight per second it took nine minutes. Silo's standard API key tier allows 20 per second and 1,200 per minute, so both plugins on one key stay at 960 per minute. All 40 sampled "unsupported series layout" refusals came from a `Specials` folder. With `Specials` read as season 0, the remaining refusals on that library came from its read-only media mount.

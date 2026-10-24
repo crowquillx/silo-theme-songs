@@ -43,6 +43,20 @@ type Destination struct {
 
 var seasonFolder = regexp.MustCompile(`(?i)^season[ ._-]*(\d{1,3})$`)
 
+// seasonNumber reads "Season NN" folders and "Specials", the Sonarr and
+// Jellyfin name for season 0.
+func seasonNumber(folder string) (int, bool) {
+	if strings.EqualFold(folder, "specials") {
+		return 0, true
+	}
+	match := seasonFolder.FindStringSubmatch(folder)
+	if len(match) != 2 {
+		return 0, false
+	}
+	n, _ := strconv.Atoi(match[1])
+	return n, true
+}
+
 func Within(root, path string) bool {
 	r, e := filepath.Rel(root, path)
 	return e == nil && r != ".." && !strings.HasPrefix(r, ".."+string(filepath.Separator)) && !filepath.IsAbs(r)
@@ -235,11 +249,10 @@ func (p Policy) Resolve(inv siloapi.Inventory, item siloapi.Item, season *siloap
 			if item.Type == "series" {
 				seasons[f.Season] = true
 				if len(parts) > 1 {
-					match := seasonFolder.FindStringSubmatch(parts[0])
-					if len(match) != 2 || len(parts) > 3 {
+					n, ok := seasonNumber(parts[0])
+					if !ok || len(parts) > 3 {
 						return nil, errors.New("unsupported series layout")
 					}
-					n, _ := strconv.Atoi(match[1])
 					if n != f.Season {
 						return nil, errors.New("season folder disagrees with catalog membership")
 					}

@@ -17,8 +17,10 @@ var ErrDeferred = errors.New("HTTP rate limit extends beyond the request deadlin
 
 const (
 	ExternalInterval = time.Second
-	SiloInterval     = 500 * time.Millisecond
-	UserAgent        = "silo-theme-plugins (+https://github.com/crowquillx/silo-theme-songs)"
+	// Silo's standard API key tier allows 20 requests per second and 1,200 per
+	// minute. Eight per second leaves room for both theme plugins on one key.
+	SiloInterval = 125 * time.Millisecond
+	UserAgent    = "silo-theme-plugins (+https://github.com/crowquillx/silo-theme-songs)"
 )
 
 type originState struct {

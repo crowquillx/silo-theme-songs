@@ -15,6 +15,8 @@ Part of [Crowquillx Silo Plugins](https://github.com/crowquillx/crowquillx-silo-
 7. Turn on **Manual library scans**, or enable the plugin's **themes** source in Autoscan with poll delivery and no path rewrites.
 8. Turn off **Preview only** and run **Download Theme Songs**. With manual scans, run **Reconcile Theme Songs** after the next library scan.
 
+Silo runs each plugin task when it starts. To run them on a schedule instead, edit their triggers in **Scheduled Tasks**.
+
 Silo writes themes into your media folders, so they must be writable. Silo's Docker Compose file mounts media read-only. Remove `:ro` from the media volume and recreate the container.
 
 The first Preview or Download that finds a YouTube source installs yt-dlp and Deno in the plugin's state directory. This uses about 190 MB and needs access to GitHub. The plugin checks the yt-dlp release signature and the Deno checksum, and it checks for a new yt-dlp release once a day.
@@ -33,7 +35,7 @@ Leave these empty unless your setup differs from Silo's Docker image.
 | Provider `ffmpeg` | `/usr/lib/jellyfin-ffmpeg/ffmpeg`, then `ffmpeg` on PATH |
 | Provider `yt_dlp` and `js_runtime` | `yt-dlp`, Deno or Node 22+ on PATH, then the managed copies |
 
-To use only your own yt-dlp and JavaScript runtime, set `"manage_tools": false` in **Provider settings (JSON)**. Use separate movie or series folders. Media files may be symlinks, but the plugin refuses other symlinks inside a media folder. If AnimeThemes manages a library, add its ID to **Anime-managed library IDs**.
+To use only your own yt-dlp and JavaScript runtime, set `"manage_tools": false` in **Provider settings (JSON)**. Use separate movie or series folders, with `Season NN` or `Specials` folders inside series. Media files may be symlinks, but the plugin refuses other symlinks inside a media folder. If AnimeThemes manages a library, add its ID to **Anime-managed library IDs**.
 
 ## Build
 
