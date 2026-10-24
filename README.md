@@ -8,19 +8,13 @@ Part of [Crowquillx Silo Plugins](https://github.com/crowquillx/crowquillx-silo-
 
 1. Add the [Crowquillx catalog](https://github.com/crowquillx/crowquillx-silo-plugins#install) in **Administration → Plugins → Catalog** and install **Theme Songs**.
 2. In **Installed**, open the plugin's **Configure** button or settings gear, then **Global Configuration**. Set the Silo URL, an administrator API key, primary profile ID, selected libraries, persistent state directory and writable media roots. Use [config.example.json](config.example.json) as a reference.
-3. Set **ffprobe executable** to the installed ffprobe path. In **Provider settings (JSON)**, set `ffmpeg` to the FFmpeg path, keeping your other entries. Silo's Docker image uses `/usr/lib/jellyfin-ffmpeg/ffprobe` and `/usr/lib/jellyfin-ffmpeg/ffmpeg`.
-4. Select **Save config**, then run **Preview** and check the plugin's status page.
+3. FFmpeg and ffprobe default to Silo's Docker paths, `/usr/lib/jellyfin-ffmpeg/ffmpeg` and `/usr/lib/jellyfin-ffmpeg/ffprobe`. When those files are missing, the plugin uses `ffmpeg` and `ffprobe` from PATH. To use other copies, set **ffprobe executable** and the `ffmpeg` entry in **Provider settings (JSON)**.
+4. Select **Save config**, then run **Preview**. Tasks that take longer than Silo's 10-second task call continue in the background; check the plugin's status page for the result.
 5. Enable the plugin's **themes** Autoscan source with poll delivery and no path rewrites. Allow two polls, then disable **Preview only** and run **Download**. For manual scans, enable **Manual library scans** instead and run **Reconcile** after scanning.
 
-For an empty **Provider settings (JSON)** field, the Docker tool setting is:
+**Provider settings (JSON)** contains the provider object only; `ffprobe` has its own field. Conversion requires FFmpeg 4.4+ with `libmp3lame` and ffprobe. YouTube sources also require yt-dlp 2025.11.12+, its EJS scripts, and Deno 2.3+ or Node 22+; see [yt-dlp setup](https://github.com/yt-dlp/yt-dlp/wiki/EJS). Their paths use `yt_dlp` and `js_runtime` in Provider settings.
 
-```json
-{"ffmpeg": "/usr/lib/jellyfin-ffmpeg/ffmpeg"}
-```
-
-This field contains the provider object only; `ffprobe` has its own field. For other installations, use paths available to the plugin. Conversion requires FFmpeg 4.4+ with `libmp3lame` and ffprobe. YouTube sources also require yt-dlp 2025.11.12+, its EJS scripts, and Deno 2.3+ or Node 22+; see [yt-dlp setup](https://github.com/yt-dlp/yt-dlp/wiki/EJS). Their paths use `yt_dlp` and `js_runtime` in Provider settings.
-
-Use dedicated movie or series folders. Keep the state directory across upgrades. If AnimeThemes manages a library, add its ID to this plugin's `anime_library_ids` setting.
+Use dedicated movie or series folders. Media files may be symlinks, as in debrid or rclone libraries, but other symlinks inside a media folder are refused. Keep the state directory across upgrades. If AnimeThemes manages a library, add its ID to this plugin's `anime_library_ids` setting.
 
 ## Build
 

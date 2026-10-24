@@ -52,6 +52,7 @@ type Report struct {
 	Truncated      bool      `json:"truncated,omitempty"`
 	RepairCount    int       `json:"repair_count,omitempty"`
 	RepairPaths    []string  `json:"repair_paths,omitempty"`
+	Message        string    `json:"message,omitempty"`
 }
 
 func (r *Report) add(row Row) {
@@ -80,10 +81,30 @@ type Server struct {
 	report      Report
 	repairCount int
 	repairPaths []string
+	jobs        map[string]*job // background task runs by mode, guarded by mu
+	jobCtx      context.Context
+	cancelJobs  context.CancelFunc
+}
+
+type job struct {
+	done   chan struct{}
+	cancel context.CancelFunc
+	report Report
 }
 
 func New(m *pluginv1.PluginManifest, name string, anime bool, f Factory) *Server {
-	return &Server{manifest: m, name: name, anime: anime, factory: f, report: Report{State: "not_configured", Rows: []Row{}}}
+	s := &Server{manifest: m, name: name, anime: anime, factory: f, report: Report{State: "not_configured", Rows: []Row{}}, jobs: map[string]*job{}}
+	s.jobCtx, s.cancelJobs = context.WithCancel(context.Background())
+	return s
+}
+
+// stopJobs cancels background task runs so configuration changes do not wait
+// behind them. Later runs use a fresh context.
+func (s *Server) stopJobs() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.cancelJobs()
+	s.jobCtx, s.cancelJobs = context.WithCancel(context.Background())
 }
 func (s *Server) GetManifest(context.Context, *pluginv1.GetManifestRequest) (*pluginv1.GetManifestResponse, error) {
 	return &pluginv1.GetManifestResponse{Manifest: s.manifest}, nil
@@ -114,6 +135,7 @@ func (s *Server) Configure(ctx context.Context, req *pluginv1.ConfigureRequest) 
 	return &pluginv1.ConfigureResponse{}, nil
 }
 func (s *Server) resetLocal() error {
+	s.stopJobs()
 	s.work.Lock()
 	defer s.work.Unlock()
 	s.mu.Lock()
@@ -139,6 +161,7 @@ func (s *Server) ConfigureLocal(_ context.Context, cfg Config) error {
 	if e != nil {
 		return e
 	}
+	s.stopJobs()
 	s.work.Lock()
 	defer s.work.Unlock()
 	s.mu.Lock()
@@ -171,6 +194,7 @@ func (s *Server) ConfigureLocal(_ context.Context, cfg Config) error {
 	return nil
 }
 func (s *Server) Close() error {
+	s.stopJobs()
 	s.work.Lock()
 	defer s.work.Unlock()
 	s.mu.Lock()
@@ -193,7 +217,28 @@ func (s *Server) Run(ctx context.Context, req *pluginv1.RunScheduledTaskRequest)
 	if mode == "" {
 		return nil, errors.New("unknown theme task")
 	}
-	report := s.Execute(ctx, mode)
+	j := s.start(mode)
+	// Answer shortly before the RPC deadline; the run itself continues.
+	var budget <-chan time.Time
+	if deadline, ok := ctx.Deadline(); ok {
+		t := time.NewTimer(time.Until(deadline) - time.Second)
+		defer t.Stop()
+		budget = t.C
+	}
+	report := Report{State: "running", Mode: mode, At: time.Now().UTC(), Rows: []Row{}, Message: "The task continues in the background. The Theme Songs status page shows its result."}
+	select {
+	case <-j.done:
+		report = j.report
+	case <-budget:
+	case <-ctx.Done():
+		// Silo cancelled the task; a deadline only ends this RPC.
+		if errors.Is(ctx.Err(), context.Canceled) {
+			s.forget(mode, j)
+			j.cancel()
+			report.State = "cancelled"
+			report.Message = ""
+		}
+	}
 	data, e := json.Marshal(report)
 	if e != nil {
 		return nil, e
@@ -205,6 +250,36 @@ func (s *Server) Run(ctx context.Context, req *pluginv1.RunScheduledTaskRequest)
 	out, e := structpb.NewStruct(m)
 	return &pluginv1.RunScheduledTaskResponse{Output: out}, e
 }
+
+// start runs a task detached from the Run RPC. Silo gives each Run call a
+// 10-second control deadline, far shorter than a library inventory or download.
+// A run already in progress for the same mode is reused.
+func (s *Server) start(mode string) *job {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if j := s.jobs[mode]; j != nil {
+		return j
+	}
+	ctx, cancel := context.WithCancel(s.jobCtx)
+	j := &job{done: make(chan struct{}), cancel: cancel}
+	s.jobs[mode] = j
+	go func() {
+		defer cancel()
+		j.report = s.Execute(ctx, mode)
+		s.forget(mode, j)
+		close(j.done)
+	}()
+	return j
+}
+
+func (s *Server) forget(mode string, j *job) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.jobs[mode] == j {
+		delete(s.jobs, mode)
+	}
+}
+
 func generation(c Config, source siloapi.ScanSource) string {
 	h := sha256.Sum256([]byte(c.BaseURL + "\x00" + source.ID + "\x00" + c.SourceGeneration))
 	return hex.EncodeToString(h[:])
@@ -214,6 +289,9 @@ func (s *Server) Execute(ctx context.Context, mode string) (report Report) {
 	s.work.Lock()
 	defer s.work.Unlock()
 	report = Report{State: "complete", Mode: mode, At: time.Now().UTC(), Rows: []Row{}, CatalogAdapter: "native_v2"}
+	s.mu.Lock()
+	s.report = Report{State: "running", Mode: mode, At: report.At, Rows: []Row{}, RepairCount: s.repairCount, RepairPaths: append([]string(nil), s.repairPaths...)}
+	s.mu.Unlock()
 	defer func() {
 		s.mu.Lock()
 		report.RepairCount = s.repairCount

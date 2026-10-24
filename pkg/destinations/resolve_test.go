@@ -182,3 +182,42 @@ func TestNestedEpisodeDirectoryHasOneEpisodeIdentity(t *testing.T) {
 		})
 	}
 }
+func TestSymlinkedCatalogMediaIsAllowed(t *testing.T) {
+	p, inv, item := fixture(t)
+	store := t.TempDir()
+	for i := range inv.Files {
+		path := inv.Files[i].Path
+		target := filepath.Join(store, filepath.Base(path))
+		if e := os.Rename(path, target); e != nil {
+			t.Fatal(e)
+		}
+		if e := os.Symlink(target, path); e != nil {
+			t.Fatal(e)
+		}
+	}
+	s := siloapi.Season{ID: "s2", Number: 2}
+	d, e := p.Resolve(inv, item, &s)
+	if e != nil || len(d) != 1 {
+		t.Fatalf("refused symlinked catalog media: %+v %v", d, e)
+	}
+	season := d[0].LocalPath
+	extra := filepath.Join(season, "notes.txt")
+	if e := os.Symlink(filepath.Join(store, "a.mkv"), extra); e != nil {
+		t.Fatal(e)
+	}
+	if _, e := p.Resolve(inv, item, &s); e == nil {
+		t.Fatal("accepted an unknown symlink")
+	}
+	os.Remove(extra)
+	if e := os.Symlink(store, filepath.Join(season, "theme-music")); e != nil {
+		t.Fatal(e)
+	}
+	if _, e := p.Resolve(inv, item, &s); e == nil {
+		t.Fatal("accepted a symlinked theme-music directory")
+	}
+	os.Remove(filepath.Join(season, "theme-music"))
+	os.Remove(filepath.Join(store, "b.mkv"))
+	if _, e := p.Resolve(inv, item, &s); e == nil {
+		t.Fatal("accepted a dangling catalog symlink")
+	}
+}

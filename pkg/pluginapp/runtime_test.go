@@ -11,6 +11,7 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	pluginv1 "github.com/Silo-Server/silo-plugin-sdk/pkg/pluginproto/silo/plugin/v1"
 	"github.com/crowquillx/silo-theme-songs/pkg/destinations"
@@ -174,5 +175,66 @@ func TestTaskKeysAndReadOnlyRoutes(t *testing.T) {
 	r, e := s.Handle(context.Background(), &pluginv1.HandleHTTPRequest{Method: "POST", Path: "/"})
 	if e != nil || r.StatusCode != 405 {
 		t.Fatal("accepted write route")
+	}
+}
+
+func TestRunOutlivesHostDeadline(t *testing.T) {
+	release := make(chan struct{})
+	var capabilityRequests atomic.Int32
+	h := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/api/v2/catalog/themes/capabilities":
+			capabilityRequests.Add(1)
+			<-release
+			fmt.Fprint(w, `{"state":"available"}`)
+		case "/api/v2/libraries":
+			fmt.Fprint(w, `{"items":[{"id":"1","type":"movies","enabled":true}]}`)
+		case "/api/v2/catalog":
+			fmt.Fprint(w, `{"items":[],"page":{"has_more":false}}`)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer h.Close()
+	s := New(&pluginv1.PluginManifest{PluginId: "test.plugin"}, "general", false, func(Config) (Provider, error) { return &fakeProvider{}, nil })
+	defer s.Close()
+	c := Defaults()
+	c.BaseURL, c.APIKey, c.ProfileID, c.StateDir = h.URL, "fixture-secret", "primary", t.TempDir()
+	c.LibraryIDs = []string{"1"}
+	c.ManualRefresh = true
+	c.Policy = destinations.Policy{AllowedRoots: []string{t.TempDir()}}
+	if e := s.ConfigureLocal(context.Background(), c); e != nil {
+		t.Fatal(e)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 1500*time.Millisecond)
+	defer cancel()
+	r, e := s.Run(ctx, &pluginv1.RunScheduledTaskRequest{TaskKey: "plugin:1:preview"})
+	if e != nil || ctx.Err() != nil {
+		t.Fatalf("Run did not answer before its deadline: %v", e)
+	}
+	if got := r.GetOutput().AsMap()["state"]; got != "running" {
+		t.Fatalf("state %v, want running", got)
+	}
+	// A second trigger joins the running task instead of queueing another.
+	again, againCancel := context.WithTimeout(context.Background(), 1100*time.Millisecond)
+	defer againCancel()
+	if _, e := s.Run(again, &pluginv1.RunScheduledTaskRequest{TaskKey: "plugin:1:preview"}); e != nil {
+		t.Fatal(e)
+	}
+	if n := capabilityRequests.Load(); n != 1 {
+		t.Fatalf("%d concurrent preview runs, want one", n)
+	}
+	close(release)
+	r, e = s.Run(context.Background(), &pluginv1.RunScheduledTaskRequest{TaskKey: "plugin:1:preview"})
+	if e != nil {
+		t.Fatal(e)
+	}
+	if got := r.GetOutput().AsMap()["state"]; got != "complete" {
+		t.Fatalf("background result %v, want complete", r.GetOutput().AsMap())
+	}
+	status, e := s.Handle(context.Background(), &pluginv1.HandleHTTPRequest{Method: "GET", Path: "/status"})
+	if e != nil || !strings.Contains(string(status.Body), `"state":"complete"`) {
+		t.Fatalf("status page lacks the background result: %s", status.GetBody())
 	}
 }

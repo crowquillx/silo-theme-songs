@@ -35,7 +35,7 @@ type App struct {
 }
 
 func New(c pluginapp.Config) (pluginapp.Provider, error) {
-	o := Options{YTDLP: "yt-dlp", FFmpeg: "ffmpeg", MaxBytes: 80 << 20, TimeoutSeconds: 300, Types: []string{"series", "movie"}}
+	o := Options{YTDLP: "yt-dlp", FFmpeg: provider.BundledTool("ffmpeg"), MaxBytes: 80 << 20, TimeoutSeconds: 300, Types: []string{"series", "movie"}}
 	if len(c.Provider) > 0 {
 		d := json.NewDecoder(bytes.NewReader(c.Provider))
 		d.DisallowUnknownFields()
@@ -46,7 +46,7 @@ func New(c pluginapp.Config) (pluginapp.Provider, error) {
 	if o.MaxBytes < 1 || o.MaxBytes > 512<<20 || o.TimeoutSeconds < 1 || o.TimeoutSeconds > 1200 {
 		return nil, errors.New("invalid download size or time limit")
 	}
-	a := &App{opts: o, resolver: &provider.Resolver{DB: &provider.ThemerrDB{}, AllowedDirectHosts: o.Hosts}, downloader: &provider.Downloader{Tools: provider.ToolPaths{YTDLP: o.YTDLP, FFmpeg: o.FFmpeg, FFprobe: c.FFprobe, JSRuntime: o.JSRuntime}, StageParent: c.StateDir, AllowedDirectHosts: o.Hosts, MaxBytes: o.MaxBytes, MaxDuration: time.Duration(o.TimeoutSeconds) * time.Second}}
+	a := &App{opts: o, resolver: &provider.Resolver{DB: &provider.ThemerrDB{}, AllowedDirectHosts: o.Hosts}, downloader: &provider.Downloader{Tools: provider.ToolPaths{YTDLP: o.YTDLP, FFmpeg: provider.DefaultTool(o.FFmpeg, "ffmpeg"), FFprobe: provider.DefaultTool(c.FFprobe, "ffprobe"), JSRuntime: o.JSRuntime}, StageParent: c.StateDir, AllowedDirectHosts: o.Hosts, MaxBytes: o.MaxBytes, MaxDuration: time.Duration(o.TimeoutSeconds) * time.Second}}
 	return a, nil
 }
 func (a *App) Select(ctx context.Context, t pluginapp.Target) ([]pluginapp.Candidate, error) {

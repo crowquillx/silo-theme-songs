@@ -30,7 +30,7 @@ type Config struct {
 }
 
 func Defaults() Config {
-	return Config{PreviewOnly: true, SourceGeneration: "1", MaxDownloads: 10, FFprobe: "ffprobe"}
+	return Config{PreviewOnly: true, SourceGeneration: "1", MaxDownloads: 10, FFprobe: provider.BundledTool("ffprobe")}
 }
 func (c Config) Validate() error {
 	if _, e := siloapi.New(c.BaseURL, c.APIKey, c.ProfileID); e != nil {

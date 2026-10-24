@@ -7,6 +7,6 @@
     "linux/amd64",
     "linux/arm64"
   ],
-  "validated_on": "2026-09-24",
+  "validated_on": "2026-10-24",
   "validation_report": "validation.md"
 }

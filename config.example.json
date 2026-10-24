@@ -11,7 +11,7 @@
   "preview_only": true,
   "manual_refresh": false,
   "source_generation": "1",
-  "ffprobe": "/usr/bin/ffprobe",
+  "ffprobe": "/usr/lib/jellyfin-ffmpeg/ffprobe",
   "max_downloads": 10,
   "destinations": {
     "allowed_roots": [
@@ -28,7 +28,7 @@
   },
   "provider": {
     "yt_dlp": "/usr/local/bin/yt-dlp",
-    "ffmpeg": "/usr/bin/ffmpeg",
+    "ffmpeg": "/usr/lib/jellyfin-ffmpeg/ffmpeg",
     "types": [
       "series",
       "movie"

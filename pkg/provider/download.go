@@ -28,6 +28,31 @@ type ToolPaths struct {
 	JSRuntime string // deno[:path] or node[:path]; empty discovers a supported runtime
 }
 
+// bundledFFmpegDir is where Silo's Docker image installs jellyfin-ffmpeg.
+var bundledFFmpegDir = "/usr/lib/jellyfin-ffmpeg"
+
+// BundledTool returns the path of ffmpeg or ffprobe in Silo's Docker image.
+func BundledTool(name string) string { return filepath.Join(bundledFFmpegDir, name) }
+
+// DefaultTool resolves an ffmpeg or ffprobe setting. An empty setting or the
+// bundled path uses Silo's copy, or name on PATH when that copy is missing. The
+// bare name uses PATH, or Silo's copy when PATH has none. Other paths are kept.
+func DefaultTool(configured, name string) string {
+	bundled := BundledTool(name)
+	switch configured {
+	case name:
+		if _, err := exec.LookPath(name); err != nil {
+			return bundled
+		}
+	case "", bundled:
+		if info, err := os.Stat(bundled); err != nil || info.IsDir() {
+			return name
+		}
+		return bundled
+	}
+	return configured
+}
+
 type ToolVersions struct {
 	YTDLP        string
 	FFmpeg       string

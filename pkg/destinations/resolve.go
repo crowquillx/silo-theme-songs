@@ -262,7 +262,14 @@ func (p Policy) Resolve(inv siloapi.Inventory, item siloapi.Item, season *siloap
 				return err
 			}
 			if d.Type()&os.ModeSymlink != 0 {
-				return errors.New("symlink found beneath media owner")
+				// Symlinked catalog media is common with debrid and rclone
+				// libraries. Themes are written only beneath theme-music
+				// through a rooted descriptor, so these links are never followed.
+				if _, ok := known[path]; ok {
+					return nil
+				}
+				rel, _ := filepath.Rel(local, path)
+				return fmt.Errorf("symlink found beneath media owner: %s", rel)
 			}
 			if d.IsDir() {
 				return nil

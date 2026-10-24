@@ -25,3 +25,11 @@ The experimental TelevisionTunes source is disabled. Its TLS certificate failed 
 The shared downloader passes real FFmpeg conversion and full decode checks for Ogg/Vorbis, Opus, FLAC, WAV, AAC, M4A and M4B sources, including mono and multichannel inputs. MP3 sources remain byte-identical. MP3 packets in a WAV container are copied without re-encoding. The AnimeThemes adapter also passes a generated Ogg-to-MP3 download test. CI and release jobs require these codec tools.
 
 Regression tests cover missing conversion tools before a download, failed and oversized conversion, invalid output, cancellation with child-process cleanup, and publication with the converted extension. The existing publication/discovery test starts with an Ogg candidate, publishes an MP3, confirms discovery and avoids another download on repeated runs. Previously managed files keep their format and source identity.
+
+## Hosted tasks in v0.1.8
+
+On 2026-10-24, v0.1.7 failed every hosted Preview on a 37-movie library, while the same configuration passed through the plugin CLI. The server's `ScheduledTaskClient.Run` adds a 10-second deadline when the task manager's context has none. The plugin's request pacing then refused the next Silo read, reporting it as a rate limit. Earlier validation used fixtures small enough to finish within that deadline.
+
+Tasks now run detached from the RPC, which returns a `running` report one second before its deadline. The status page receives the final report. Repeated triggers join the active run, cancelling the task in Silo stops it, and reconfiguration cancels background runs. Against the same server, the hosted Preview listed all 37 movies through `127.0.0.1:8080` using the default bundled ffprobe and FFmpeg paths.
+
+That library's video files are symlinks to a remote mount, which v0.1.7 refused for every movie. Symlinks that are known catalog files are now accepted; any other symlink beneath an owner, including `theme-music`, is still refused, and dangling catalog links count as offline media. No downloads were run during this check because the server image does not include yt-dlp.
