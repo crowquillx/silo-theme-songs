@@ -25,6 +25,7 @@ import (
 
 	"github.com/ProtonMail/go-crypto/openpgp"
 	"github.com/crowquillx/silo-theme-songs/pkg/ratelimit"
+	"github.com/hashicorp/go-hclog"
 )
 
 // ytdlpSigningKey is yt-dlp's release key, fingerprint
@@ -56,6 +57,7 @@ var ytdlpVersion = regexp.MustCompile(`^20[0-9]{2}\.[0-9]{2}\.[0-9]{2}(\.[0-9]+)
 type Manager struct {
 	Dir    string
 	Client *http.Client // nil uses a paced HTTPS client
+	Log    hclog.Logger // nil discards
 
 	// Tests override the release sources and platform.
 	ytdlpBase string
@@ -102,10 +104,14 @@ func (m *Manager) YTDLP(ctx context.Context) (string, error) {
 	if err != nil {
 		st.FailedAt = now
 		m.save(st)
+		m.logger().Warn("yt-dlp release check failed", "installed", st.YTDLP, "error", err)
 		if installed {
 			return m.ytdlpPath(st.YTDLP), nil
 		}
 		return "", fmt.Errorf("install yt-dlp: %w", err)
+	}
+	if version != st.YTDLP {
+		m.logger().Info("installed yt-dlp", "version", version, "previous", st.YTDLP, "dir", m.Dir)
 	}
 	m.stale = false
 	st.YTDLP, st.CheckedAt, st.FailedAt = version, now, time.Time{}
@@ -126,14 +132,23 @@ func (m *Manager) Deno(ctx context.Context) (string, error) {
 		return exe, nil
 	}
 	if err := m.installDeno(ctx); err != nil {
+		m.logger().Warn("Deno install failed", "version", DenoVersion, "error", err)
 		return "", fmt.Errorf("install Deno: %w", err)
 	}
+	m.logger().Info("installed Deno", "version", DenoVersion, "dir", m.Dir)
 	st.Deno = DenoVersion
 	if err := m.save(st); err != nil {
 		return "", err
 	}
 	m.prune("deno", DenoVersion)
 	return exe, nil
+}
+
+func (m *Manager) logger() hclog.Logger {
+	if m.Log == nil {
+		return hclog.NewNullLogger()
+	}
+	return m.Log
 }
 
 func (m *Manager) platform() string {

@@ -25,6 +25,7 @@ import (
 	"github.com/crowquillx/silo-theme-songs/pkg/engine"
 	"github.com/crowquillx/silo-theme-songs/pkg/provider"
 	"github.com/crowquillx/silo-theme-songs/pkg/siloapi"
+	"github.com/hashicorp/go-hclog"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 	"google.golang.org/protobuf/types/known/structpb"
@@ -53,14 +54,74 @@ type Report struct {
 	RepairCount    int       `json:"repair_count,omitempty"`
 	RepairPaths    []string  `json:"repair_paths,omitempty"`
 	Message        string    `json:"message,omitempty"`
+	// Summary counts every row, including rows past the display limit.
+	Summary []SummaryRow `json:"summary,omitempty"`
+	// Progress describes a task that is still running; the rest of the
+	// report is the last finished run.
+	Progress string `json:"progress,omitempty"`
 }
 
+type SummaryRow struct {
+	Action string `json:"action"`
+	Reason string `json:"reason,omitempty"`
+	Count  int    `json:"count"`
+}
+
+const (
+	displayRows  = 1000
+	summaryLimit = 30
+	maxRows      = 200000
+)
+
 func (r *Report) add(row Row) {
-	if len(r.Rows) >= 1000 {
+	if len(r.Rows) >= maxRows {
 		r.Truncated = true
 		return
 	}
 	r.Rows = append(r.Rows, row)
+}
+
+// actionPriority orders rows so problems and planned work stay visible
+// when the report is cut to its display limit.
+func actionPriority(action string) int {
+	switch action {
+	case "download_failed", "prerequisite_failed", "needs_review", "selection_changed", "operator_review", "stale", "protected", "destination_unconfirmed", "reconcile_required", "pending":
+		return 0
+	case "downloaded", "would_download", "deferred":
+		return 1
+	case "refused":
+		return 2
+	case "source_unavailable", "no_theme":
+		return 3
+	}
+	return 4
+}
+
+// finish summarizes all rows, then keeps the most important ones.
+func (r *Report) finish() {
+	counts := map[SummaryRow]int{}
+	for _, row := range r.Rows {
+		counts[SummaryRow{Action: row.Action, Reason: row.Reason}]++
+	}
+	r.Summary = r.Summary[:0]
+	for k, n := range counts {
+		k.Count = n
+		r.Summary = append(r.Summary, k)
+	}
+	slices.SortFunc(r.Summary, func(a, b SummaryRow) int {
+		if a.Count != b.Count {
+			return b.Count - a.Count
+		}
+		return strings.Compare(a.Action+a.Reason, b.Action+b.Reason)
+	})
+	if len(r.Summary) > summaryLimit {
+		r.Summary = r.Summary[:summaryLimit]
+	}
+	slices.SortStableFunc(r.Rows, func(a, b Row) int { return actionPriority(a.Action) - actionPriority(b.Action) })
+	if len(r.Rows) > displayRows {
+		r.Rows = r.Rows[:displayRows]
+		r.Truncated = true
+	}
 }
 
 type Server struct {
@@ -81,6 +142,7 @@ type Server struct {
 	report      Report
 	repairCount int
 	repairPaths []string
+	log         hclog.Logger
 	jobs        map[string]*job // background task runs by mode, guarded by mu
 	jobCtx      context.Context
 	cancelJobs  context.CancelFunc
@@ -93,7 +155,7 @@ type job struct {
 }
 
 func New(m *pluginv1.PluginManifest, name string, anime bool, f Factory) *Server {
-	s := &Server{manifest: m, name: name, anime: anime, factory: f, report: Report{State: "not_configured", Rows: []Row{}}, jobs: map[string]*job{}}
+	s := &Server{manifest: m, name: name, anime: anime, factory: f, report: Report{State: "not_configured", Rows: []Row{}}, jobs: map[string]*job{}, log: hclog.NewNullLogger()}
 	s.jobCtx, s.cancelJobs = context.WithCancel(context.Background())
 	return s
 }
@@ -155,7 +217,9 @@ func (s *Server) resetLocal() error {
 }
 func (s *Server) ConfigureLocal(ctx context.Context, cfg Config) error {
 	cfg = cfg.withDefaults(ctx, s.manifest.GetPluginId())
+	cfg.Log = s.log
 	if e := cfg.Validate(); e != nil {
+		s.log.Warn("configuration rejected", "error", e)
 		return e
 	}
 	client, e := siloapi.New(cfg.siloURL, cfg.APIKey, cfg.ProfileID)
@@ -189,6 +253,7 @@ func (s *Server) ConfigureLocal(ctx context.Context, cfg Config) error {
 	s.provider = provider
 	s.engine = store
 	s.report = Report{State: "configured", Rows: []Row{}, RepairCount: s.repairCount, RepairPaths: append([]string(nil), s.repairPaths...)}
+	s.log.Info("configured", "silo_url", cfg.siloURL, "libraries", cfg.LibraryIDs, "state_dir", cfg.StateDir, "preview_only", cfg.PreviewOnly, "manual_scans", cfg.ManualRefresh, "primary_profile", cfg.ProfileID == "")
 	if s.repairCount > 0 {
 		s.report.State = "needs_attention"
 	}
@@ -234,7 +299,7 @@ func (s *Server) Run(ctx context.Context, req *pluginv1.RunScheduledTaskRequest)
 	case <-ctx.Done():
 		// Silo cancelled the task; a deadline only ends this RPC.
 		if errors.Is(ctx.Err(), context.Canceled) {
-			s.forget(mode, j)
+			s.forget(j)
 			j.cancel()
 			report.State = "cancelled"
 			report.Message = ""
@@ -258,26 +323,42 @@ func (s *Server) Run(ctx context.Context, req *pluginv1.RunScheduledTaskRequest)
 func (s *Server) start(mode string) *job {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if j := s.jobs[mode]; j != nil {
+	// With preview only on, Download does what Preview does. Silo starts
+	// every plugin task at startup, so both share one run.
+	key := mode
+	if mode == "sync" && s.cfg.PreviewOnly {
+		key = "preview"
+	}
+	if j := s.jobs[key]; j != nil {
+		s.log.Info("task joined a run already in progress", "task", mode)
 		return j
 	}
 	ctx, cancel := context.WithCancel(s.jobCtx)
 	j := &job{done: make(chan struct{}), cancel: cancel}
-	s.jobs[mode] = j
+	s.jobs[key] = j
 	go func() {
 		defer cancel()
 		j.report = s.Execute(ctx, mode)
-		s.forget(mode, j)
+		s.forget(j)
 		close(j.done)
 	}()
 	return j
 }
 
-func (s *Server) forget(mode string, j *job) {
+// setProgress updates the status of the running task.
+func (s *Server) setProgress(format string, args ...any) {
+	s.mu.Lock()
+	s.report.Progress = fmt.Sprintf(format, args...)
+	s.mu.Unlock()
+}
+
+func (s *Server) forget(j *job) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if s.jobs[mode] == j {
-		delete(s.jobs, mode)
+	for k, v := range s.jobs {
+		if v == j {
+			delete(s.jobs, k)
+		}
 	}
 }
 
@@ -290,10 +371,11 @@ func (s *Server) Execute(ctx context.Context, mode string) (report Report) {
 	s.work.Lock()
 	defer s.work.Unlock()
 	report = Report{State: "complete", Mode: mode, At: time.Now().UTC(), Rows: []Row{}, CatalogAdapter: "native_v2"}
-	s.mu.Lock()
-	s.report = Report{State: "running", Mode: mode, At: report.At, Rows: []Row{}, RepairCount: s.repairCount, RepairPaths: append([]string(nil), s.repairPaths...)}
-	s.mu.Unlock()
+	s.setProgress("%s: starting", taskName(mode))
+	s.log.Info("task started", "task", mode)
 	defer func() {
+		report.finish()
+		s.logResult(report)
 		s.mu.Lock()
 		report.RepairCount = s.repairCount
 		report.RepairPaths = append([]string(nil), s.repairPaths...)
@@ -442,10 +524,20 @@ func (s *Server) Execute(ctx context.Context, mode string) (report Report) {
 			report.add(Row{Item: lib.Name, Action: "excluded", Reason: "anime-managed library"})
 			continue
 		}
-		inv, err := api.Inventory(ctx, lib)
-		if err != nil {
-			report.add(Row{Item: lib.Name, Action: "refused", Reason: err.Error()})
-			continue
+		// Reconcile rechecks managed files only, so it skips the library read
+		// and source lookups.
+		var inv siloapi.Inventory
+		if mode != "reconcile" {
+			s.log.Info("reading library", "library", lib.Name)
+			var err error
+			inv, err = api.InventoryProgress(ctx, lib, func(done, total int) {
+				s.setProgress("%s: reading %s, %d of %d items", taskName(mode), lib.Name, done, total)
+			})
+			if err != nil {
+				s.log.Warn("library read failed", "library", lib.Name, "error", err)
+				report.add(Row{Item: lib.Name, Action: "refused", Reason: err.Error()})
+				continue
+			}
 		}
 		// Reconcile every previously managed fallback on every normal run,
 		// including items that no longer have selected sources.
@@ -478,11 +570,15 @@ func (s *Server) Execute(ctx context.Context, mode string) (report Report) {
 		if mode != "preview" && !(reconcileRequired && mode != "reconcile") {
 			s.checkDiscovery(ctx, api, store, lib.ID, &report, mode == "reconcile")
 		}
-		for _, item := range inv.Items {
+		if mode == "reconcile" {
+			continue
+		}
+		for i, item := range inv.Items {
 			if e := ctx.Err(); e != nil {
 				report.State = "cancelled"
 				return
 			}
+			s.setProgress("%s: checking %s, %d of %d items, %d downloaded", taskName(mode), lib.Name, i, len(inv.Items), report.Downloaded)
 			if slices.Contains(c.ExcludeItems, item.ID) {
 				continue
 			}
@@ -602,8 +698,10 @@ func (s *Server) Execute(ctx context.Context, mode string) (report Report) {
 							report.add(r)
 							continue
 						}
+						s.setProgress("%s: downloading %s", taskName(mode), item.Title)
 						staged, err := p.Fetch(ctx, candidate)
 						if err != nil {
+							s.log.Warn("download failed", "item", item.Title, "season", sn, "error", err)
 							r.Action = "download_failed"
 							r.Reason = err.Error()
 							report.add(r)
@@ -620,9 +718,11 @@ func (s *Server) Execute(ctx context.Context, mode string) (report Report) {
 							report.Errors = append(report.Errors, closeErr.Error())
 						}
 						if err != nil {
+							s.log.Warn("publication refused", "item", item.Title, "season", sn, "error", err)
 							r.Action = "refused"
 							r.Reason = err.Error()
 						} else {
+							s.log.Info("theme downloaded", "item", item.Title, "season", sn, "destination", dest.ServerPath, "source", candidate.Provenance)
 							r.Action = "downloaded"
 							report.Downloaded++
 							if c.ManualRefresh {
@@ -686,6 +786,30 @@ func (s *Server) Execute(ctx context.Context, mode string) (report Report) {
 	}
 	return
 }
+func taskName(mode string) string {
+	switch mode {
+	case "sync":
+		return "Download"
+	case "reconcile":
+		return "Reconcile"
+	}
+	return "Preview"
+}
+
+// logResult writes one line per run plus one per kind of problem, so a large
+// library does not produce a line per item.
+func (s *Server) logResult(r Report) {
+	s.log.Info("task finished", "task", r.Mode, "state", r.State, "downloaded", r.Downloaded, "rows", len(r.Rows), "seconds", int(time.Since(r.At).Seconds()))
+	for _, e := range r.Errors {
+		s.log.Warn("task error", "task", r.Mode, "error", e)
+	}
+	for _, row := range r.Summary {
+		if actionPriority(row.Action) == 0 || row.Action == "refused" {
+			s.log.Warn("items need attention", "task", r.Mode, "action", row.Action, "reason", row.Reason, "count", row.Count)
+		}
+	}
+}
+
 func existing(records []engine.Record, d destinations.Destination, id string) (engine.Record, bool) {
 	for _, r := range records {
 		if r.LocalPath == d.LocalPath && r.SourceID == id && r.Status != engine.Failed {
@@ -832,7 +956,7 @@ func revalidate(ctx context.Context, api *siloapi.Client, c Config, old destinat
 		if lib.ID != old.LibraryID || !lib.Enabled {
 			continue
 		}
-		inv, e := api.Inventory(ctx, lib)
+		inv, e := api.ItemInventory(ctx, lib, old.ItemID)
 		if e != nil {
 			return e
 		}
@@ -947,7 +1071,7 @@ func (s *Server) PollChanges(ctx context.Context, req *pluginv1.PollChangesReque
 	return out, nil
 }
 
-var page = template.Must(template.New("status").Parse(`<!doctype html><html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width"><title>Theme download status</title><style>body{font:16px system-ui,sans-serif;line-height:1.5;max-width:1200px;margin:32px auto;padding:0 24px;color:#20242b;background:#fafafa}h1{font-size:28px}table{border-collapse:collapse;width:100%;background:white}th,td{text-align:left;vertical-align:top;padding:12px;border-bottom:1px solid #ddd}th{font-weight:600}code{overflow-wrap:anywhere}p{max-width:75ch}small{color:#555}</style><h1>Theme download status</h1><p>State: {{.State}}. Run the Preview, Download or Reconcile task in Silo Administration to update this report.</p>{{range .Errors}}<p>{{.}}</p>{{end}}{{if .RepairCount}}<p>{{.RepairCount}} scan paths need repair and were rejected from indexing.</p>{{range .RepairPaths}}<p><code>{{.}}</code></p>{{end}}{{end}}<p>{{.Downloaded}} files downloaded in the last run. Downloaded files need a library scan and exact owner discovery before they appear as discovered.</p><table><thead><tr><th>Item / season</th><th>Theme and source</th><th>Destination</th><th>Action</th></tr></thead><tbody>{{range .Rows}}<tr><td>{{.Item}}{{if ge .Season 0}}<br><small>Season {{.Season}}</small>{{end}}</td><td>{{.Theme}}<br><small>{{.Source}}</small></td><td><code>{{.Destination}}</code></td><td>{{.Action}}<br><small>{{.Reason}}</small>{{range .Candidates}}<br><a href="{{.URL}}" target="_blank" rel="noopener noreferrer">{{.Title}}</a> <small>{{.Channel}} (score {{.Score}})</small>{{end}}</td></tr>{{end}}</tbody></table>{{if .Truncated}}<p>The report reached its 1,000-row display limit. Narrow the selected libraries to inspect the remaining items.</p>{{end}}</html>`))
+var page = template.Must(template.New("status").Parse(`<!doctype html><html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width"><title>Theme download status</title><style>body{font:16px system-ui,sans-serif;line-height:1.5;max-width:1200px;margin:32px auto;padding:0 24px;color:#20242b;background:#fafafa}h1{font-size:28px}h2{font-size:20px;margin-top:32px}table{border-collapse:collapse;width:100%;background:white}th,td{text-align:left;vertical-align:top;padding:12px;border-bottom:1px solid #ddd}th{font-weight:600}code{overflow-wrap:anywhere}p{max-width:75ch}small{color:#555}</style><h1>Theme download status</h1>{{if .Progress}}<p><strong>Running.</strong> {{.Progress}}. The report below is from the last finished run; reload for updates.</p>{{end}}<p>State: {{.State}}{{if .Mode}} ({{.Mode}}, {{.At.Format "2006-01-02 15:04 MST"}}){{end}}. Run the Preview, Download or Reconcile task in Silo Administration to update this report.</p>{{range .Errors}}<p>{{.}}</p>{{end}}{{if .RepairCount}}<p>{{.RepairCount}} scan paths need repair and were rejected from indexing.</p>{{range .RepairPaths}}<p><code>{{.}}</code></p>{{end}}{{end}}<p>{{.Downloaded}} files downloaded in the last run. Downloaded files need a library scan and exact owner discovery before they appear as discovered.</p>{{if .Summary}}<h2>Summary</h2><table><thead><tr><th>Count</th><th>Action</th><th>Reason</th></tr></thead><tbody>{{range .Summary}}<tr><td>{{.Count}}</td><td>{{.Action}}</td><td><small>{{.Reason}}</small></td></tr>{{end}}</tbody></table><h2>Items</h2>{{end}}<table><thead><tr><th>Item / season</th><th>Theme and source</th><th>Destination</th><th>Action</th></tr></thead><tbody>{{range .Rows}}<tr><td>{{.Item}}{{if ge .Season 0}}<br><small>Season {{.Season}}</small>{{end}}</td><td>{{.Theme}}<br><small>{{.Source}}</small></td><td><code>{{.Destination}}</code></td><td>{{.Action}}<br><small>{{.Reason}}</small>{{range .Candidates}}<br><a href="{{.URL}}" target="_blank" rel="noopener noreferrer">{{.Title}}</a> <small>{{.Channel}} (score {{.Score}})</small>{{end}}</td></tr>{{end}}</tbody></table>{{if .Truncated}}<p>This page shows 1,000 rows, problems and planned downloads first. The summary counts every item.</p>{{end}}</html>`))
 
 func (s *Server) Handle(_ context.Context, req *pluginv1.HandleHTTPRequest) (*pluginv1.HandleHTTPResponse, error) {
 	if req.GetMethod() != "GET" {

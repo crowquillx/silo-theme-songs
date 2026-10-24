@@ -47,3 +47,11 @@ Fixture tests cover signature rejection, checksum mismatch, links and escaping p
 ## Specials and Silo pacing in v0.1.10
 
 A hosted AnimeThemes preview of an 876-series library took about 45 minutes at two Silo requests per second. At eight per second it took nine minutes. Silo's standard API key tier allows 20 per second and 1,200 per minute, so both plugins on one key stay at 960 per minute. All 40 sampled "unsupported series layout" refusals came from a `Specials` folder. With `Specials` read as season 0, the remaining refusals on that library came from its read-only media mount.
+
+## Stale files, reporting and logging in v0.1.11
+
+On 2026-10-24, two items were refused because Silo's admin file list (`media_files` for the item) still included a release that Radarr or Sonarr had replaced; the catalog hides those rows with `missing_since IS NULL`. After the plugin skipped listed files missing on disk, both items resolved on the live server.
+
+A hosted Preview of 62 items showed live progress on the status page while keeping the previous report, and the final report included a summary of all rows. Silo's plugin host logs plugin stderr through hclog at Info to the container's stderr, and parses hclog JSON lines at their level. The plugin now writes those JSON lines. Silo's Logs page does not show plugin output.
+
+Revalidation before publication and during Reconcile previously read the whole library for each record. It now reads one item; the resolver still refuses unknown videos under the owner folder, which covers files of other items there.

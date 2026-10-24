@@ -77,6 +77,10 @@ type Inventory struct {
 	Files    []Membership
 	Seasons  map[string][]Season
 	Refusals map[string]string
+	// Unmatched holds admin files of an item that are absent from the
+	// catalog. Silo keeps rows for deleted files, such as releases replaced
+	// by an upgrade, so the resolver checks whether each still exists.
+	Unmatched map[string][]File
 }
 type ScanSource struct {
 	ID           string `json:"id"`
@@ -306,7 +310,12 @@ func (c *Client) Detail(ctx context.Context, id, library string) (Item, error) {
 	return v, e
 }
 func (c *Client) Inventory(ctx context.Context, lib Library) (Inventory, error) {
-	inv := Inventory{Library: lib, Seasons: map[string][]Season{}, Refusals: map[string]string{}}
+	return c.InventoryProgress(ctx, lib, nil)
+}
+
+// InventoryProgress reads a library and reports each item read.
+func (c *Client) InventoryProgress(ctx context.Context, lib Library, progress func(done, total int)) (Inventory, error) {
+	inv := newInventory(lib)
 	if !Eligible(lib) {
 		return inv, errors.New("unsupported library kind")
 	}
@@ -316,7 +325,10 @@ func (c *Client) Inventory(ctx context.Context, lib Library) (Inventory, error) 
 	}
 	seen := map[string]bool{}
 	filesSeen := map[string]bool{}
-	for _, row := range rows {
+	for i, row := range rows {
+		if progress != nil {
+			progress(i, len(rows))
+		}
 		if row.Type != "movie" && row.Type != "series" {
 			continue
 		}
@@ -324,79 +336,101 @@ func (c *Client) Inventory(ctx context.Context, lib Library) (Inventory, error) 
 			return inv, errors.New("duplicate catalog item")
 		}
 		seen[row.ID] = true
-		item, e := c.Detail(ctx, row.ID, lib.ID)
-		if e != nil {
+		if e := c.addItem(ctx, &inv, row.ID, filesSeen); e != nil {
 			return inv, e
-		}
-		inv.Items = append(inv.Items, item)
-		fs, e := pages[File](ctx, c, "/admin/items/"+item.ID+"/files", nil, true)
-		if e != nil {
-			return inv, e
-		}
-		membership := map[string]Membership{}
-		if item.Type == "series" {
-			seasons, e := pages[Season](ctx, c, "/catalog/series/"+item.ID+"/seasons", url.Values{"library_id": {lib.ID}}, false)
-			if e != nil {
-				return inv, e
-			}
-			inv.Seasons[item.ID] = seasons
-			for _, s := range seasons {
-				eps, e := pages[Episode](ctx, c, fmt.Sprintf("/catalog/series/%s/seasons/%d/episodes", item.ID, s.Number), url.Values{"library_id": {lib.ID}}, false)
-				if e != nil {
-					return inv, e
-				}
-				for _, ep := range eps {
-					if ep.Season != s.Number {
-						return inv, errors.New("episode season mismatch")
-					}
-					for _, f := range ep.Files {
-						if old, ok := membership[f.FileID]; ok && (old.Season != ep.Season || old.Episode != ep.Number) {
-							return inv, errors.New("ambiguous episode file membership")
-						}
-						membership[f.FileID] = Membership{ItemID: item.ID, Kind: item.Type, Season: ep.Season, Episode: ep.Number, SeasonID: s.ID}
-					}
-				}
-			}
-		} else {
-			// The dedicated versions route carries the complete bounded version set.
-			versions, e := pages[Version](ctx, c, "/catalog/items/"+item.ID+"/versions", url.Values{"library_id": {lib.ID}}, false)
-			if e != nil {
-				return inv, e
-			}
-			for _, f := range versions {
-				membership[f.FileID] = Membership{ItemID: item.ID, Kind: item.Type, Season: -1}
-			}
-		}
-		matched := make(map[string]bool, len(membership))
-		for _, f := range fs {
-			if f.LibraryID != lib.ID {
-				continue
-			}
-			if filesSeen[f.ID] {
-				return inv, errors.New("file assigned to multiple catalog items")
-			}
-			filesSeen[f.ID] = true
-			m, ok := membership[f.ID]
-			if !ok {
-				inv.Refusals[item.ID] = "unclassified file or extra cannot be excluded reliably"
-				continue
-			}
-			matched[f.ID] = true
-			if f.Path == "" || !filepath.IsAbs(f.Path) || strings.Contains(f.Path, "\x00") {
-				inv.Refusals[item.ID] = "nonlocal or hidden media path"
-				continue
-			}
-			m.File = f
-			inv.Files = append(inv.Files, m)
-		}
-		for id := range membership {
-			if !matched[id] {
-				inv.Refusals[item.ID] = "catalog file missing from selected library admin inventory"
-				break
-			}
 		}
 	}
 	return inv, nil
+}
+
+// ItemInventory reads one item of a library. The resolver refuses unknown
+// videos on disk, so files of other items in the same folder still block it.
+func (c *Client) ItemInventory(ctx context.Context, lib Library, id string) (Inventory, error) {
+	inv := newInventory(lib)
+	if !Eligible(lib) {
+		return inv, errors.New("unsupported library kind")
+	}
+	return inv, c.addItem(ctx, &inv, id, map[string]bool{})
+}
+
+func newInventory(lib Library) Inventory {
+	return Inventory{Library: lib, Seasons: map[string][]Season{}, Refusals: map[string]string{}, Unmatched: map[string][]File{}}
+}
+
+func (c *Client) addItem(ctx context.Context, inv *Inventory, id string, filesSeen map[string]bool) error {
+	lib := inv.Library
+	item, e := c.Detail(ctx, id, lib.ID)
+	if e != nil {
+		return e
+	}
+	inv.Items = append(inv.Items, item)
+	fs, e := pages[File](ctx, c, "/admin/items/"+item.ID+"/files", nil, true)
+	if e != nil {
+		return e
+	}
+	membership := map[string]Membership{}
+	if item.Type == "series" {
+		seasons, e := pages[Season](ctx, c, "/catalog/series/"+item.ID+"/seasons", url.Values{"library_id": {lib.ID}}, false)
+		if e != nil {
+			return e
+		}
+		inv.Seasons[item.ID] = seasons
+		for _, s := range seasons {
+			eps, e := pages[Episode](ctx, c, fmt.Sprintf("/catalog/series/%s/seasons/%d/episodes", item.ID, s.Number), url.Values{"library_id": {lib.ID}}, false)
+			if e != nil {
+				return e
+			}
+			for _, ep := range eps {
+				if ep.Season != s.Number {
+					return errors.New("episode season mismatch")
+				}
+				for _, f := range ep.Files {
+					if old, ok := membership[f.FileID]; ok && (old.Season != ep.Season || old.Episode != ep.Number) {
+						return errors.New("ambiguous episode file membership")
+					}
+					membership[f.FileID] = Membership{ItemID: item.ID, Kind: item.Type, Season: ep.Season, Episode: ep.Number, SeasonID: s.ID}
+				}
+			}
+		}
+	} else {
+		// The dedicated versions route carries the complete bounded version set.
+		versions, e := pages[Version](ctx, c, "/catalog/items/"+item.ID+"/versions", url.Values{"library_id": {lib.ID}}, false)
+		if e != nil {
+			return e
+		}
+		for _, f := range versions {
+			membership[f.FileID] = Membership{ItemID: item.ID, Kind: item.Type, Season: -1}
+		}
+	}
+	matched := make(map[string]bool, len(membership))
+	for _, f := range fs {
+		if f.LibraryID != lib.ID {
+			continue
+		}
+		if filesSeen[f.ID] {
+			return errors.New("file assigned to multiple catalog items")
+		}
+		filesSeen[f.ID] = true
+		m, ok := membership[f.ID]
+		if !ok {
+			inv.Unmatched[item.ID] = append(inv.Unmatched[item.ID], f)
+			continue
+		}
+		matched[f.ID] = true
+		if f.Path == "" || !filepath.IsAbs(f.Path) || strings.Contains(f.Path, "\x00") {
+			inv.Refusals[item.ID] = "nonlocal or hidden media path"
+			continue
+		}
+		m.File = f
+		inv.Files = append(inv.Files, m)
+	}
+	for id := range membership {
+		if !matched[id] {
+			inv.Refusals[item.ID] = "catalog file missing from selected library admin inventory"
+			break
+		}
+	}
+	return nil
 }
 
 // Discovered checks a specific filename-derived title and exact native owner.

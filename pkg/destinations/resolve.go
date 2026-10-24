@@ -164,6 +164,16 @@ func (p Policy) Resolve(inv siloapi.Inventory, item siloapi.Item, season *siloap
 	if reason := inv.Refusals[item.ID]; reason != "" {
 		return nil, errors.New(reason)
 	}
+	for _, f := range inv.Unmatched[item.ID] {
+		// Silo keeps rows for deleted files, such as a release replaced by an
+		// upgrade. A file that is gone cannot be an extra in the folder.
+		if local, e := p.Local(f.Path); e == nil {
+			if _, e = os.Lstat(local); errors.Is(e, fs.ErrNotExist) {
+				continue
+			}
+		}
+		return nil, fmt.Errorf("unclassified file or extra cannot be excluded reliably: %s", filepath.Base(f.Path))
+	}
 	groups := map[string][]siloapi.Membership{}
 	seriesSeasons := map[int]bool{}
 	for _, f := range inv.Files {

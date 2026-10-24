@@ -11,6 +11,7 @@ import (
 
 	"github.com/Silo-Server/silo-plugin-sdk/pkg/pluginsdk/manifest"
 	sdkruntime "github.com/Silo-Server/silo-plugin-sdk/pkg/pluginsdk/runtime"
+	"github.com/hashicorp/go-hclog"
 	"google.golang.org/protobuf/encoding/protojson"
 )
 
@@ -30,6 +31,13 @@ func Main(data []byte, version, name string, anime bool, f Factory) {
 		return
 	}
 	s := New(m, name, anime, f)
+	// Silo copies plugin stderr into its log and reads hclog JSON lines at
+	// their level; other lines become debug messages.
+	level := hclog.LevelFromString(os.Getenv("SILO_THEME_LOG_LEVEL"))
+	if level == hclog.NoLevel {
+		level = hclog.Info
+	}
+	s.log = hclog.New(&hclog.LoggerOptions{Name: m.GetPluginId(), Level: level, Output: os.Stderr, JSONFormat: len(os.Args) == 1})
 	if len(os.Args) > 1 {
 		if len(os.Args) != 3 || (os.Args[1] != "preview" && os.Args[1] != "sync" && os.Args[1] != "reconcile") {
 			fmt.Fprintln(os.Stderr, "usage: plugin [manifest | preview CONFIG.json | sync CONFIG.json | reconcile CONFIG.json]")
@@ -67,5 +75,5 @@ func Main(data []byte, version, name string, anime bool, f Factory) {
 		}
 		return
 	}
-	sdkruntime.Serve(sdkruntime.ServeConfig{Servers: sdkruntime.CapabilityServers{Runtime: s, ScheduledTask: s, ScanSource: s, HttpRoutes: s}})
+	sdkruntime.Serve(sdkruntime.ServeConfig{Logger: s.log, Servers: sdkruntime.CapabilityServers{Runtime: s, ScheduledTask: s, ScanSource: s, HttpRoutes: s}})
 }

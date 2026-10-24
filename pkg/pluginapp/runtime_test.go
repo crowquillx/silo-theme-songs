@@ -18,6 +18,7 @@ import (
 	"github.com/crowquillx/silo-theme-songs/pkg/destinations"
 	"github.com/crowquillx/silo-theme-songs/pkg/provider"
 	"github.com/crowquillx/silo-theme-songs/pkg/siloapi"
+	"github.com/hashicorp/go-hclog"
 )
 
 type fakeProvider struct {
@@ -55,7 +56,6 @@ func TestAutoscanHandshakePublicationAndExactDiscovery(t *testing.T) {
 	p := &fakeProvider{staged: stage}
 	var discovered atomic.Bool
 	var failRevalidation atomic.Bool
-	var inventoryRequests atomic.Int32
 	h := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Header.Get("Authorization") != "Bearer fixture-secret" || r.Header.Get("X-Profile-Id") != "primary" {
 			t.Error("wrong HTTP credentials")
@@ -67,12 +67,13 @@ func TestAutoscanHandshakePublicationAndExactDiscovery(t *testing.T) {
 		case "/api/v2/libraries":
 			json.NewEncoder(w).Encode(map[string]any{"items": []any{map[string]any{"id": "1", "type": "movies", "enabled": true, "paths": []string{root}}}})
 		case "/api/v2/catalog":
-			if n := inventoryRequests.Add(1); n >= 2 && n <= 4 && failRevalidation.Load() {
+			fmt.Fprint(w, `{"items":[{"content_id":"movie:fixture","type":"movie","title":"Fixture"}],"page":{"has_more":false}}`)
+		case "/api/v2/catalog/items/movie:fixture":
+			// Revalidation reads the item; fail it while the test asks.
+			if failRevalidation.Load() {
 				w.WriteHeader(http.StatusServiceUnavailable)
 				return
 			}
-			fmt.Fprint(w, `{"items":[{"content_id":"movie:fixture","type":"movie","title":"Fixture"}],"page":{"has_more":false}}`)
-		case "/api/v2/catalog/items/movie:fixture":
 			v := map[string]any{"content_id": "movie:fixture", "type": "movie", "title": "Fixture"}
 			if discovered.Load() {
 				entries, _ := os.ReadDir(filepath.Join(owner, "theme-music"))
@@ -145,7 +146,6 @@ func TestAutoscanHandshakePublicationAndExactDiscovery(t *testing.T) {
 		t.Fatalf("repeat downloaded: %+v", r)
 	}
 	discovered.Store(true)
-	inventoryRequests.Store(0)
 	failRevalidation.Store(true)
 	r = s.Execute(ctx, "reconcile")
 	if r.State != "needs_attention" || len(r.Errors) == 0 {
@@ -218,11 +218,18 @@ func TestRunOutlivesHostDeadline(t *testing.T) {
 	if got := r.GetOutput().AsMap()["state"]; got != "running" {
 		t.Fatalf("state %v, want running", got)
 	}
-	// A second trigger joins the running task instead of queueing another.
-	again, againCancel := context.WithTimeout(context.Background(), 1100*time.Millisecond)
-	defer againCancel()
-	if _, e := s.Run(again, &pluginv1.RunScheduledTaskRequest{TaskKey: "plugin:1:preview"}); e != nil {
-		t.Fatal(e)
+	// A second trigger joins the running task instead of queueing another,
+	// and with preview only on, Download joins Preview.
+	for _, key := range []string{"plugin:1:preview", "plugin:1:sync"} {
+		again, againCancel := context.WithTimeout(context.Background(), 1100*time.Millisecond)
+		if _, e := s.Run(again, &pluginv1.RunScheduledTaskRequest{TaskKey: key}); e != nil {
+			t.Fatal(e)
+		}
+		againCancel()
+	}
+	running, e := s.Handle(context.Background(), &pluginv1.HandleHTTPRequest{Method: "GET", Path: "/status"})
+	if e != nil || !strings.Contains(string(running.Body), `"progress":"Preview: starting"`) || !strings.Contains(string(running.Body), `"state":"configured"`) {
+		t.Fatalf("running status lacks progress or the last report: %s", running.GetBody())
 	}
 	if n := capabilityRequests.Load(); n != 1 {
 		t.Fatalf("%d concurrent preview runs, want one", n)
@@ -299,5 +306,69 @@ func TestMissingLibrariesListsChoices(t *testing.T) {
 	r := s.Execute(context.Background(), "preview")
 	if r.State != "prerequisite_failed" || len(r.Errors) != 1 || !strings.Contains(r.Errors[0], `"3" (Shows, series)`) || strings.Contains(r.Errors[0], "Music") {
 		t.Fatalf("library choices: %+v", r)
+	}
+}
+
+func TestReportKeepsProblemsVisibleAndCountsEverything(t *testing.T) {
+	var r Report
+	for i := range 1500 {
+		r.add(Row{ItemID: fmt.Sprint(i), Action: "preserved", Reason: "existing root theme is preserved"})
+	}
+	r.add(Row{ItemID: "late", Action: "download_failed", Reason: "YouTube video is unavailable"})
+	r.add(Row{ItemID: "planned", Action: "would_download"})
+	r.finish()
+	if len(r.Rows) != displayRows || !r.Truncated || r.Rows[0].ItemID != "late" || r.Rows[1].ItemID != "planned" {
+		t.Fatalf("display rows: %d truncated=%v first=%+v", len(r.Rows), r.Truncated, r.Rows[:2])
+	}
+	if len(r.Summary) != 3 || r.Summary[0] != (SummaryRow{Action: "preserved", Reason: "existing root theme is preserved", Count: 1500}) {
+		t.Fatalf("summary %+v", r.Summary)
+	}
+}
+
+func TestReconcileSkipsLibraryReadAndLogsJSON(t *testing.T) {
+	var catalogReads atomic.Int32
+	h := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/v2/catalog/themes/capabilities":
+			fmt.Fprint(w, `{"state":"available"}`)
+		case "/api/v2/libraries":
+			fmt.Fprint(w, `{"items":[{"id":"1","name":"Movies","type":"movies","enabled":true}]}`)
+		case "/api/v2/catalog":
+			catalogReads.Add(1)
+			fmt.Fprint(w, `{"items":[],"page":{"has_more":false}}`)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer h.Close()
+	s := New(&pluginv1.PluginManifest{PluginId: "test.plugin"}, "general", false, func(Config) (Provider, error) { return &fakeProvider{}, nil })
+	defer s.Close()
+	var logs strings.Builder
+	s.log = hclog.New(&hclog.LoggerOptions{Output: &logs, JSONFormat: true, Level: hclog.Info})
+	c := Defaults()
+	c.BaseURL, c.APIKey, c.ProfileID, c.StateDir, c.ManualRefresh = h.URL, "fixture-secret", "primary", t.TempDir(), true
+	c.LibraryIDs = []string{"1"}
+	if e := s.ConfigureLocal(context.Background(), c); e != nil {
+		t.Fatal(e)
+	}
+	if r := s.Execute(context.Background(), "reconcile"); r.State != "complete" || catalogReads.Load() != 0 {
+		t.Fatalf("reconcile read the library: %d reads, %+v", catalogReads.Load(), r)
+	}
+	s.Execute(context.Background(), "preview")
+	if catalogReads.Load() != 1 {
+		t.Fatalf("preview read the library %d times", catalogReads.Load())
+	}
+	var finished int
+	for _, line := range strings.Split(strings.TrimSpace(logs.String()), "\n") {
+		var entry map[string]any
+		if e := json.Unmarshal([]byte(line), &entry); e != nil {
+			t.Fatalf("log line is not JSON: %q", line)
+		}
+		if entry["@message"] == "task finished" && entry["@level"] == "info" {
+			finished++
+		}
+	}
+	if finished != 2 || strings.Contains(logs.String(), "fixture-secret") {
+		t.Fatalf("logs: %s", logs.String())
 	}
 }

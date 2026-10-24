@@ -3,6 +3,7 @@ package destinations
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/crowquillx/silo-theme-songs/pkg/siloapi"
@@ -240,5 +241,18 @@ func TestSpecialsFolderIsSeasonZero(t *testing.T) {
 	inv.Files[len(inv.Files)-1].Season = 3
 	if _, e := p.Resolve(inv, item, nil); e == nil {
 		t.Fatal("accepted a Specials folder assigned to season 3")
+	}
+}
+func TestDeletedUnmatchedFilesAreIgnored(t *testing.T) {
+	p, inv, item := fixture(t)
+	show := filepath.Dir(filepath.Dir(inv.Files[0].Path))
+	gone := filepath.Join(show, "Season 01", "a.old-release.mkv")
+	inv.Unmatched = map[string][]siloapi.File{"show": {{ID: "old", LibraryID: "1", Path: gone}}}
+	if d, e := p.Resolve(inv, item, &siloapi.Season{ID: "s1", Number: 1}); e != nil || len(d) != 1 {
+		t.Fatalf("deleted upgrade blocked the item: %v", e)
+	}
+	os.WriteFile(gone, []byte("video"), 0644)
+	if _, e := p.Resolve(inv, item, &siloapi.Season{ID: "s1", Number: 1}); e == nil || !strings.Contains(e.Error(), "a.old-release.mkv") {
+		t.Fatalf("present unmatched file accepted: %v", e)
 	}
 }

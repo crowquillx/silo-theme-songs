@@ -53,7 +53,7 @@ func New(c pluginapp.Config) (pluginapp.Provider, error) {
 	// Silo's Docker image has no yt-dlp or JavaScript runtime; install them
 	// beneath the state directory unless the operator opts out.
 	if o.ManageTools == nil || *o.ManageTools {
-		a.downloader.Installer = &tools.Manager{Dir: filepath.Join(c.StateDir, "tools")}
+		a.downloader.Installer = &tools.Manager{Dir: filepath.Join(c.StateDir, "tools"), Log: c.Log}
 	}
 	return a, nil
 }

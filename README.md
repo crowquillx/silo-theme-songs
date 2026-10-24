@@ -15,7 +15,11 @@ Part of [Crowquillx Silo Plugins](https://github.com/crowquillx/crowquillx-silo-
 7. Turn on **Manual library scans**, or enable the plugin's **themes** source in Autoscan with poll delivery and no path rewrites.
 8. Turn off **Preview only** and run **Download Theme Songs**. With manual scans, run **Reconcile Theme Songs** after the next library scan.
 
-Silo runs each plugin task when it starts. To run them on a schedule instead, edit their triggers in **Scheduled Tasks**.
+Silo runs each plugin task when it starts. To run them on a schedule instead, edit their triggers in **Scheduled Tasks**. While **Preview only** is on, Preview and Download share one run, and Reconcile only rechecks themes the plugin downloaded.
+
+Tasks keep running after Silo marks them complete. The Theme Songs status page shows their progress and the last result, with a summary that counts every item.
+
+Silo writes plugin logs to its container output, such as `docker logs silo`, not to its Logs page. Each run logs its start, its result, each download and one line per kind of problem. Set `SILO_THEME_LOG_LEVEL=warn` on the Silo container to log only problems.
 
 Silo writes themes into your media folders, so they must be writable. Silo's Docker Compose file mounts media read-only. Remove `:ro` from the media volume and recreate the container.
 

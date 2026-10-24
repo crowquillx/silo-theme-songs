@@ -13,6 +13,7 @@ import (
 	"github.com/crowquillx/silo-theme-songs/pkg/destinations"
 	"github.com/crowquillx/silo-theme-songs/pkg/provider"
 	"github.com/crowquillx/silo-theme-songs/pkg/siloapi"
+	"github.com/hashicorp/go-hclog"
 )
 
 type Config struct {
@@ -32,6 +33,9 @@ type Config struct {
 	Provider         json.RawMessage     `json:"provider"`
 
 	siloURL string // BaseURL, or the host's internal API URL when BaseURL is empty
+
+	// Log is the plugin's logger, set by the runtime before Factory runs.
+	Log hclog.Logger `json:"-"`
 }
 
 // fallbackSiloURL is Silo's API listener inside its Docker image.

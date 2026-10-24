@@ -5,6 +5,7 @@ go 1.26.0
 require (
 	github.com/ProtonMail/go-crypto v1.5.2
 	github.com/Silo-Server/silo-plugin-sdk v0.17.0
+	github.com/hashicorp/go-hclog v1.6.3
 	google.golang.org/grpc v1.82.1
 	google.golang.org/protobuf v1.36.11
 )
@@ -13,7 +14,6 @@ require (
 	github.com/cloudflare/circl v1.6.3 // indirect
 	github.com/fatih/color v1.13.0 // indirect
 	github.com/golang/protobuf v1.5.4 // indirect
-	github.com/hashicorp/go-hclog v1.6.3 // indirect
 	github.com/hashicorp/go-plugin v1.7.0 // indirect
 	github.com/hashicorp/yamux v0.1.2 // indirect
 	github.com/mattn/go-colorable v0.1.12 // indirect
