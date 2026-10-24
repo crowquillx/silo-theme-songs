@@ -175,8 +175,12 @@ func (s *Server) Configure(ctx context.Context, req *pluginv1.ConfigureRequest) 
 	var raw []byte
 	for _, entry := range req.GetConfig() {
 		if entry.GetKey() == "settings" {
+			settings := entry.GetValue().AsMap()
+			if e := decodeFormText(settings); e != nil {
+				return nil, e
+			}
 			var err error
-			raw, err = json.Marshal(entry.GetValue().AsMap())
+			raw, err = json.Marshal(settings)
 			if err != nil {
 				return nil, errors.New("invalid plugin settings")
 			}
@@ -414,7 +418,7 @@ func (s *Server) Execute(ctx context.Context, mode string) (report Report) {
 				choices = append(choices, fmt.Sprintf("%q (%s, %s)", l.ID, l.Name, l.Type))
 			}
 		}
-		report.Errors = append(report.Errors, "Set library_ids to the libraries to use, for example [\"1\"]. Movie and series libraries: "+strings.Join(choices, ", ")+".")
+		report.Errors = append(report.Errors, "Enter the libraries to use in Selected library IDs, for example 1, 3. Movie and series libraries: "+strings.Join(choices, ", ")+".")
 		return
 	}
 	if host := sdkruntime.Host(); host != nil {

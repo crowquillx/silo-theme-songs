@@ -5,9 +5,12 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"slices"
+	"strings"
+	"unicode"
 
 	sdkruntime "github.com/Silo-Server/silo-plugin-sdk/pkg/pluginsdk/runtime"
 	"github.com/crowquillx/silo-theme-songs/pkg/destinations"
@@ -36,6 +39,45 @@ type Config struct {
 
 	// Log is the plugin's logger, set by the runtime before Factory runs.
 	Log hclog.Logger `json:"-"`
+}
+
+// Silo's settings form saves each textarea as text, so these settings arrive
+// as strings. Lists also accept IDs separated by commas or spaces.
+var (
+	formTextLists   = []string{"library_ids", "exclude_items", "anime_library_ids"}
+	formTextObjects = []string{"destinations", "provider"}
+)
+
+// decodeFormText replaces the text of list and object settings with their
+// values. An empty text leaves the setting unset.
+func decodeFormText(settings map[string]any) error {
+	for _, key := range append(slices.Clone(formTextLists), formTextObjects...) {
+		text, ok := settings[key].(string)
+		if !ok {
+			continue
+		}
+		text = strings.TrimSpace(text)
+		if text == "" {
+			delete(settings, key)
+			continue
+		}
+		if slices.Contains(formTextLists, key) && !strings.HasPrefix(text, "[") {
+			ids := []any{}
+			for _, id := range strings.FieldsFunc(text, func(r rune) bool { return r == ',' || unicode.IsSpace(r) }) {
+				if id = strings.Trim(id, `"'`); id != "" {
+					ids = append(ids, id)
+				}
+			}
+			settings[key] = ids
+			continue
+		}
+		var value any
+		if e := json.Unmarshal([]byte(text), &value); e != nil {
+			return fmt.Errorf("%s is not valid JSON: %v", key, e)
+		}
+		settings[key] = value
+	}
+	return nil
 }
 
 // fallbackSiloURL is Silo's API listener inside its Docker image.

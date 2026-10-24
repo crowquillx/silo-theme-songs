@@ -1,6 +1,7 @@
 package pluginapp
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -370,5 +371,36 @@ func TestReconcileSkipsLibraryReadAndLogsJSON(t *testing.T) {
 	}
 	if finished != 2 || strings.Contains(logs.String(), "fixture-secret") {
 		t.Fatalf("logs: %s", logs.String())
+	}
+}
+
+// Silo's settings form saves JSON settings as text.
+func TestSettingsFromFormText(t *testing.T) {
+	settings := map[string]any{
+		"api_key":           "key",
+		"library_ids":       ` ["3", "4"] `,
+		"exclude_items":     "5, 6 7",
+		"anime_library_ids": "",
+		"destinations":      `{"path_mappings":[{"server":"/media","local":"/mnt/media"}]}`,
+		"provider":          `{"manage_tools":false}`,
+	}
+	if e := decodeFormText(settings); e != nil {
+		t.Fatal(e)
+	}
+	raw, _ := json.Marshal(settings)
+	c := Defaults()
+	d := json.NewDecoder(bytes.NewReader(raw))
+	d.DisallowUnknownFields()
+	if e := d.Decode(&c); e != nil {
+		t.Fatal(e)
+	}
+	if !slices.Equal(c.LibraryIDs, []string{"3", "4"}) || !slices.Equal(c.ExcludeItems, []string{"5", "6", "7"}) || c.AnimeLibraryIDs != nil {
+		t.Fatalf("lists: %q %q %q", c.LibraryIDs, c.ExcludeItems, c.AnimeLibraryIDs)
+	}
+	if len(c.Policy.Mounts) != 1 || c.Policy.Mounts[0].Local != "/mnt/media" || string(c.Provider) != `{"manage_tools":false}` {
+		t.Fatalf("objects: %+v %s", c.Policy, c.Provider)
+	}
+	if e := decodeFormText(map[string]any{"destinations": `{"allowed_roots":`}); e == nil || !strings.Contains(e.Error(), "destinations") {
+		t.Fatalf("bad JSON accepted: %v", e)
 	}
 }

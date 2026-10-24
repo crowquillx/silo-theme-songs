@@ -1,5 +1,8 @@
-Theme Songs v0.1.12
+Theme Songs v0.1.13
 
-Documentation only. The README now explains how Silo runs plugin tasks: why Silo marks a task complete while it is still running, why Silo's run times and Cancel button do not reflect the real run, what Silo's startup triggers do with Preview only on and off, and where the plugin's logs appear.
+Fixes saving the settings in Silo. Silo's settings form saves each text box as text, so entering library IDs or path mappings failed with `got string, want array` or `got string, want object`. The settings now accept text:
+
+- **Selected library IDs**, **Excluded item IDs** and **Anime-managed library IDs** take IDs separated by commas or spaces, such as `3, 4`. A JSON array such as `["3", "4"]` also works.
+- **Writable roots and path mappings** and **Provider settings** take a JSON object. Invalid JSON is rejected with an error that names the setting.
 
 Linux amd64 and arm64 binaries and checksums are attached.

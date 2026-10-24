@@ -1,6 +1,6 @@
 {
   "plugin_id": "dev.crowquillx.theme-songs",
-  "version": "0.1.12",
+  "version": "0.1.13",
   "checksum": "__CHECKSUM__",
   "silo_api_version": "v1",
   "supported_platforms": [
@@ -63,7 +63,7 @@
       "key": "settings",
       "title": "Theme Songs settings",
       "description": "Connection, destination policy, and provider selection.",
-      "json_schema": "{\"type\":\"object\",\"properties\":{\"base_url\":{\"type\":\"string\"},\"api_key\":{\"type\":\"string\",\"minLength\":1},\"profile_id\":{\"type\":\"string\"},\"state_dir\":{\"type\":\"string\"},\"library_ids\":{\"type\":\"array\",\"items\":{\"type\":\"string\"}},\"exclude_items\":{\"type\":\"array\",\"items\":{\"type\":\"string\"}},\"anime_library_ids\":{\"type\":\"array\",\"items\":{\"type\":\"string\"}},\"preview_only\":{\"type\":\"boolean\",\"default\":true},\"manual_refresh\":{\"type\":\"boolean\",\"default\":false},\"source_generation\":{\"type\":\"string\",\"default\":\"1\"},\"ffprobe\":{\"type\":\"string\",\"default\":\"/usr/lib/jellyfin-ffmpeg/ffprobe\"},\"max_downloads\":{\"type\":\"integer\",\"minimum\":1,\"maximum\":100,\"default\":10},\"destinations\":{\"type\":\"object\",\"properties\":{\"allowed_roots\":{\"type\":\"array\",\"items\":{\"type\":\"string\"},\"minItems\":1},\"path_mappings\":{\"type\":\"array\",\"items\":{\"type\":\"object\",\"properties\":{\"server\":{\"type\":\"string\"},\"local\":{\"type\":\"string\"}},\"required\":[\"server\",\"local\"],\"additionalProperties\":false}},\"single_season_flat_fallback\":{\"type\":\"boolean\",\"default\":false},\"destination_overrides\":{\"type\":\"object\",\"additionalProperties\":{\"type\":\"string\"}}},\"additionalProperties\":false},\"provider\":{\"type\":\"object\"}},\"required\":[\"api_key\"],\"additionalProperties\":false}",
+      "json_schema": "{\"type\":\"object\",\"properties\":{\"base_url\":{\"type\":\"string\"},\"api_key\":{\"type\":\"string\",\"minLength\":1},\"profile_id\":{\"type\":\"string\"},\"state_dir\":{\"type\":\"string\"},\"library_ids\":{\"type\":[\"array\",\"string\"],\"items\":{\"type\":\"string\"}},\"exclude_items\":{\"type\":[\"array\",\"string\"],\"items\":{\"type\":\"string\"}},\"anime_library_ids\":{\"type\":[\"array\",\"string\"],\"items\":{\"type\":\"string\"}},\"preview_only\":{\"type\":\"boolean\",\"default\":true},\"manual_refresh\":{\"type\":\"boolean\",\"default\":false},\"source_generation\":{\"type\":\"string\",\"default\":\"1\"},\"ffprobe\":{\"type\":\"string\",\"default\":\"/usr/lib/jellyfin-ffmpeg/ffprobe\"},\"max_downloads\":{\"type\":\"integer\",\"minimum\":1,\"maximum\":100,\"default\":10},\"destinations\":{\"type\":[\"object\",\"string\"],\"properties\":{\"allowed_roots\":{\"type\":\"array\",\"items\":{\"type\":\"string\"},\"minItems\":1},\"path_mappings\":{\"type\":\"array\",\"items\":{\"type\":\"object\",\"properties\":{\"server\":{\"type\":\"string\"},\"local\":{\"type\":\"string\"}},\"required\":[\"server\",\"local\"],\"additionalProperties\":false}},\"single_season_flat_fallback\":{\"type\":\"boolean\",\"default\":false},\"destination_overrides\":{\"type\":\"object\",\"additionalProperties\":{\"type\":\"string\"}}},\"additionalProperties\":false},\"provider\":{\"type\":[\"object\",\"string\"]}},\"required\":[\"api_key\"],\"additionalProperties\":false}",
       "required": false,
       "admin_form": {
         "fields": [
@@ -90,17 +90,17 @@
           },
           {
             "key": "library_ids",
-            "label": "Selected library IDs (JSON)",
+            "label": "Selected library IDs (comma-separated)",
             "control": 2
           },
           {
             "key": "exclude_items",
-            "label": "Excluded item IDs (JSON)",
+            "label": "Excluded item IDs (comma-separated)",
             "control": 2
           },
           {
             "key": "anime_library_ids",
-            "label": "Anime-managed library IDs (JSON)",
+            "label": "Anime-managed library IDs (comma-separated)",
             "control": 2
           },
           {
