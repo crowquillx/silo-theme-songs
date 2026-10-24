@@ -15,12 +15,6 @@ Part of [Crowquillx Silo Plugins](https://github.com/crowquillx/crowquillx-silo-
 7. Turn on **Manual library scans**, or enable the plugin's **themes** source in Autoscan with poll delivery and no path rewrites.
 8. Turn off **Preview only** and run **Download Theme Songs**. With manual scans, run **Reconcile Theme Songs** after the next library scan.
 
-Silo runs each plugin task when it starts. To run them on a schedule instead, edit their triggers in **Scheduled Tasks**. While **Preview only** is on, Preview and Download share one run, and Reconcile only rechecks themes the plugin downloaded.
-
-Tasks keep running after Silo marks them complete. The Theme Songs status page shows their progress and the last result, with a summary that counts every item.
-
-Silo writes plugin logs to its container output, such as `docker logs silo`, not to its Logs page. Each run logs its start, its result, each download and one line per kind of problem. Set `SILO_THEME_LOG_LEVEL=warn` on the Silo container to log only problems.
-
 Silo writes themes into your media folders, so they must be writable. Silo's Docker Compose file mounts media read-only. Remove `:ro` from the media volume and recreate the container.
 
 The first Preview or Download that finds a YouTube source installs yt-dlp and Deno in the plugin's state directory. This uses about 190 MB and needs access to GitHub. The plugin checks the yt-dlp release signature and the Deno checksum, and it checks for a new yt-dlp release once a day.
@@ -40,6 +34,12 @@ Leave these empty unless your setup differs from Silo's Docker image.
 | Provider `yt_dlp` and `js_runtime` | `yt-dlp`, Deno or Node 22+ on PATH, then the managed copies |
 
 To use only your own yt-dlp and JavaScript runtime, set `"manage_tools": false` in **Provider settings (JSON)**. Use separate movie or series folders, with `Season NN` or `Specials` folders inside series. Media files may be symlinks, but the plugin refuses other symlinks inside a media folder. If AnimeThemes manages a library, add its ID to **Anime-managed library IDs**.
+
+### How Silo runs the plugin
+
+- Silo waits only 10 seconds for a task, so tasks keep running after Silo marks them complete. Silo's run times are therefore wrong, and **Cancel** works only in those first seconds. Saving the plugin's settings or restarting Silo stops a run. The Theme Songs status page shows progress and the last result, with a summary that counts every item.
+- Silo runs each plugin task when it starts. While **Preview only** is on, Preview and Download share one run, and Reconcile only rechecks themes the plugin downloaded. With **Preview only** off, each restart also downloads up to **Downloads per run** themes; existing themes are never replaced. To run tasks on a schedule instead, edit their triggers in **Scheduled Tasks**.
+- Silo writes plugin logs to its container output, such as `docker logs silo`, not to its Logs page. Each run logs its start, its result, each download and one line per kind of problem. Set `SILO_THEME_LOG_LEVEL=warn` on the Silo container to log only problems.
 
 ## Build
 
