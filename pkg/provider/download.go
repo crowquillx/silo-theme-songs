@@ -59,6 +59,16 @@ type ToolVersions struct {
 	FFprobe      string
 	JSRuntime    string
 	jsRuntimeArg string
+	ytdlpPath    string
+}
+
+// ToolInstaller supplies yt-dlp and Deno when neither the settings nor PATH
+// provide a usable copy.
+type ToolInstaller interface {
+	YTDLP(context.Context) (string, error)
+	Deno(context.Context) (string, error)
+	// MarkStale asks for an early update check after an extraction failure.
+	MarkStale()
 }
 
 // StagedAudio exists only in a private job directory. The caller must call
@@ -84,6 +94,7 @@ func (s *StagedAudio) Close() error {
 
 type Downloader struct {
 	Tools              ToolPaths
+	Installer          ToolInstaller // optional; used when Tools has no yt-dlp or JS runtime
 	StageParent        string
 	Client             *http.Client
 	AllowedDirectHosts []string
@@ -130,12 +141,38 @@ func (d *Downloader) Preflight(ctx context.Context, source Source) (ToolVersions
 	if !source.Extract {
 		return versions, nil
 	}
-	versions.YTDLP, err = checkTool(ctx, d.Tools.YTDLP, "yt-dlp", "--version")
+	versions.ytdlpPath, versions.YTDLP, err = d.ytdlp(ctx)
 	if err != nil {
 		return versions, err
 	}
 	versions.jsRuntimeArg, versions.JSRuntime, err = resolveJSRuntime(ctx, d.Tools.JSRuntime)
+	if err != nil && d.Tools.JSRuntime == "" && d.Installer != nil {
+		deno, installErr := d.Installer.Deno(ctx)
+		if installErr != nil {
+			return versions, &Error{MissingTool, installErr.Error()}
+		}
+		versions.jsRuntimeArg, versions.JSRuntime, err = resolveJSRuntime(ctx, "deno:"+deno)
+	}
 	return versions, err
+}
+
+// ytdlp uses the configured yt-dlp. An empty or bare "yt-dlp" setting falls
+// back to the installer when PATH has no usable copy.
+func (d *Downloader) ytdlp(ctx context.Context) (path, version string, err error) {
+	path = d.Tools.YTDLP
+	if path == "" {
+		path = "yt-dlp"
+	}
+	version, err = checkTool(ctx, path, "yt-dlp", "--version")
+	if err == nil || path != "yt-dlp" || d.Installer == nil || ctx.Err() != nil {
+		return path, version, err
+	}
+	path, installErr := d.Installer.YTDLP(ctx)
+	if installErr != nil {
+		return "", "", &Error{MissingTool, installErr.Error()}
+	}
+	version, err = checkTool(ctx, path, "yt-dlp", "--version")
+	return path, version, err
 }
 
 func checkTool(ctx context.Context, path, name, arg string) (string, error) {
@@ -176,7 +213,8 @@ func checkTool(ctx context.Context, path, name, arg string) (string, error) {
 	fields := strings.Fields(first)
 	if name == "node" || name == "deno" {
 		version := strings.TrimPrefix(first, "v")
-		if name == "deno" && len(fields) == 2 && fields[0] == "deno" {
+		// Deno 2 prints "deno 2.9.8 (stable, release, <target>)".
+		if name == "deno" && len(fields) >= 2 && fields[0] == "deno" {
 			version = fields[1]
 		}
 		m := regexp.MustCompile(`^([0-9]+)\.([0-9]+)\.[0-9]+$`).FindStringSubmatch(version)
@@ -243,10 +281,13 @@ func (d *Downloader) Fetch(ctx context.Context, source Source) (_ *StagedAudio, 
 	}()
 	var path string
 	if source.Extract {
-		path, err = d.extract(jobCtx, dir, source.URL, max, versions.jsRuntimeArg)
+		path, err = d.extract(jobCtx, dir, source.URL, max, versions)
 		if err != nil {
 			if IsCode(err, UnavailableMedia) {
 				d.recordFailure(source.URL)
+			}
+			if IsCode(err, MissingTool) && d.Installer != nil {
+				d.Installer.MarkStale()
 			}
 			return nil, err
 		}
@@ -304,10 +345,13 @@ func (d *Downloader) recordFailure(rawURL string) {
 	d.failedVideos[sha256.Sum256([]byte(rawURL))] = struct{}{}
 	if len(d.failedVideos) >= 3 {
 		d.brokenUntil = time.Now().Add(10 * time.Minute)
+		if d.Installer != nil {
+			d.Installer.MarkStale()
+		}
 	}
 }
 
-func (d *Downloader) extract(ctx context.Context, dir, raw string, max int64, jsRuntime string) (_ string, resultErr error) {
+func (d *Downloader) extract(ctx context.Context, dir, raw string, max int64, tools ToolVersions) (_ string, resultErr error) {
 	release, err := d.youtubeLimit().acquire(ctx)
 	if err != nil {
 		return "", err
@@ -324,8 +368,8 @@ func (d *Downloader) extract(ctx context.Context, dir, raw string, max int64, js
 	}
 	args := []string{"--ignore-config", "--no-config-locations", "--no-plugin-dirs", "--no-playlist", "--use-extractors", "youtube,youtube:tab,end", "--default-search", "error", "--no-cache-dir", "--no-progress", "--no-write-info-json", "--no-write-thumbnail", "--no-write-subs", "--no-write-auto-subs", "--no-mtime", "--socket-timeout", "15", "--max-filesize", strconv.FormatInt(max, 10), "--max-downloads", "1", "--match-filters", "!is_live & duration <= 1200", "-f", "bestaudio/best", "-x", "--audio-format", "mp3", "--audio-quality", "192K", "--ffmpeg-location", ffmpegPath, "-o", filepath.Join(dir, "theme.%(ext)s"), "--", raw}
 	args = append(youtubeArgs(), args...)
-	args = append([]string{"--no-js-runtimes", "--js-runtimes", jsRuntime}, args...)
-	cmd := exec.Command(d.Tools.YTDLP, args...)
+	args = append([]string{"--no-js-runtimes", "--js-runtimes", tools.jsRuntimeArg}, args...)
+	cmd := exec.Command(tools.ytdlpPath, args...)
 	cmd.Dir = dir
 	cmd.Env = []string{"PATH=" + filepath.Dir(ffmpegPath) + ":/usr/bin:/bin", "HOME=" + dir, "XDG_CONFIG_HOME=" + dir, "XDG_CACHE_HOME=" + dir, "TMPDIR=" + dir}
 	// --max-downloads 1 returns 101 after a successful download. Accept that

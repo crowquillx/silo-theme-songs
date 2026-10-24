@@ -1,6 +1,6 @@
 {
   "plugin_id": "dev.crowquillx.theme-songs",
-  "version": "0.1.8",
+  "version": "0.1.9",
   "checksum": "__CHECKSUM__",
   "silo_api_version": "v1",
   "supported_platforms": [
@@ -17,7 +17,7 @@
     "display_name": "Theme Songs",
     "summary": "Downloads movie and series theme audio from exact ThemerrDB matches and selected URLs.",
     "description_markdown": "Downloads movie and series theme audio from exact ThemerrDB matches and selected URLs. Preview ownership and source choices before downloading. Existing audio is preserved. New downloads are saved as MP3. Non-MP3 sources require FFmpeg with libmp3lame; existing MP3 audio is kept without re-encoding.",
-    "setup_markdown": "Configure the Silo URL, a dedicated administrator API key and primary profile, writable mounts, selected libraries, and persistent state. Keep preview only enabled for the first task run. Enable this plugin's themes Autoscan source with identity path rewrites, or select manual scans. Run preview, review destinations, then enable downloads. The README explains how to edit Provider settings (JSON), preserve existing values, save the configuration and run Preview. FFmpeg and ffprobe default to Silo's Docker paths under /usr/lib/jellyfin-ffmpeg, then PATH. Long tasks continue in the background; the status page shows their result.",
+    "setup_markdown": "Create an API key in Administration → API Keys, paste it into the plugin's settings and save. Restart Silo so the plugin's tasks appear, then run Preview Theme Songs. The Theme Songs status page lists your libraries; enter the ones to use in Selected library IDs. Media folders must be writable; Silo's Docker Compose file mounts them read-only by default. The first task that finds a YouTube source installs yt-dlp and Deno in the plugin's state directory. The README lists the optional settings.",
     "homepage_url": "https://github.com/crowquillx/silo-theme-songs",
     "source_url": "https://github.com/crowquillx/silo-theme-songs",
     "support_url": "https://github.com/crowquillx/silo-theme-songs/issues",
@@ -63,13 +63,13 @@
       "key": "settings",
       "title": "Theme Songs settings",
       "description": "Connection, destination policy, and provider selection.",
-      "json_schema": "{\"type\":\"object\",\"properties\":{\"base_url\":{\"type\":\"string\",\"format\":\"uri\"},\"api_key\":{\"type\":\"string\",\"minLength\":1},\"profile_id\":{\"type\":\"string\",\"minLength\":1},\"state_dir\":{\"type\":\"string\",\"minLength\":1},\"library_ids\":{\"type\":\"array\",\"items\":{\"type\":\"string\"},\"minItems\":1},\"exclude_items\":{\"type\":\"array\",\"items\":{\"type\":\"string\"}},\"anime_library_ids\":{\"type\":\"array\",\"items\":{\"type\":\"string\"}},\"preview_only\":{\"type\":\"boolean\",\"default\":true},\"manual_refresh\":{\"type\":\"boolean\",\"default\":false},\"source_generation\":{\"type\":\"string\",\"default\":\"1\"},\"ffprobe\":{\"type\":\"string\",\"default\":\"/usr/lib/jellyfin-ffmpeg/ffprobe\"},\"max_downloads\":{\"type\":\"integer\",\"minimum\":1,\"maximum\":100,\"default\":10},\"destinations\":{\"type\":\"object\",\"properties\":{\"allowed_roots\":{\"type\":\"array\",\"items\":{\"type\":\"string\"},\"minItems\":1},\"path_mappings\":{\"type\":\"array\",\"items\":{\"type\":\"object\",\"properties\":{\"server\":{\"type\":\"string\"},\"local\":{\"type\":\"string\"}},\"required\":[\"server\",\"local\"],\"additionalProperties\":false}},\"single_season_flat_fallback\":{\"type\":\"boolean\",\"default\":false},\"destination_overrides\":{\"type\":\"object\",\"additionalProperties\":{\"type\":\"string\"}}},\"required\":[\"allowed_roots\"],\"additionalProperties\":false},\"provider\":{\"type\":\"object\"}},\"required\":[\"base_url\",\"api_key\",\"profile_id\",\"state_dir\",\"library_ids\",\"destinations\"],\"additionalProperties\":false}",
+      "json_schema": "{\"type\":\"object\",\"properties\":{\"base_url\":{\"type\":\"string\"},\"api_key\":{\"type\":\"string\",\"minLength\":1},\"profile_id\":{\"type\":\"string\"},\"state_dir\":{\"type\":\"string\"},\"library_ids\":{\"type\":\"array\",\"items\":{\"type\":\"string\"}},\"exclude_items\":{\"type\":\"array\",\"items\":{\"type\":\"string\"}},\"anime_library_ids\":{\"type\":\"array\",\"items\":{\"type\":\"string\"}},\"preview_only\":{\"type\":\"boolean\",\"default\":true},\"manual_refresh\":{\"type\":\"boolean\",\"default\":false},\"source_generation\":{\"type\":\"string\",\"default\":\"1\"},\"ffprobe\":{\"type\":\"string\",\"default\":\"/usr/lib/jellyfin-ffmpeg/ffprobe\"},\"max_downloads\":{\"type\":\"integer\",\"minimum\":1,\"maximum\":100,\"default\":10},\"destinations\":{\"type\":\"object\",\"properties\":{\"allowed_roots\":{\"type\":\"array\",\"items\":{\"type\":\"string\"},\"minItems\":1},\"path_mappings\":{\"type\":\"array\",\"items\":{\"type\":\"object\",\"properties\":{\"server\":{\"type\":\"string\"},\"local\":{\"type\":\"string\"}},\"required\":[\"server\",\"local\"],\"additionalProperties\":false}},\"single_season_flat_fallback\":{\"type\":\"boolean\",\"default\":false},\"destination_overrides\":{\"type\":\"object\",\"additionalProperties\":{\"type\":\"string\"}}},\"additionalProperties\":false},\"provider\":{\"type\":\"object\"}},\"required\":[\"api_key\"],\"additionalProperties\":false}",
       "required": false,
       "admin_form": {
         "fields": [
           {
             "key": "base_url",
-            "label": "Silo base URL",
+            "label": "Silo base URL (optional)",
             "control": 1
           },
           {
@@ -80,12 +80,12 @@
           },
           {
             "key": "profile_id",
-            "label": "Primary profile ID",
+            "label": "Primary profile ID (optional)",
             "control": 1
           },
           {
             "key": "state_dir",
-            "label": "Persistent plugin state directory",
+            "label": "Persistent state directory (optional)",
             "control": 1
           },
           {
@@ -130,7 +130,7 @@
           },
           {
             "key": "destinations",
-            "label": "Writable roots and path mappings (JSON)",
+            "label": "Writable roots and path mappings (JSON, optional)",
             "control": 2
           },
           {

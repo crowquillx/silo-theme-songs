@@ -44,7 +44,8 @@ func (d *Downloader) Search(ctx context.Context, o SearchOptions) (_ []ReviewCan
 	if strings.TrimSpace(o.Title) == "" || len(o.Title) > 300 {
 		return nil, &Error{Malformed, "search title"}
 	}
-	if _, e := checkTool(ctx, d.Tools.YTDLP, "yt-dlp", "--version"); e != nil {
+	ytdlp, _, e := d.ytdlp(ctx)
+	if e != nil {
 		return nil, e
 	}
 	query := strings.TrimSpace(o.Title)
@@ -64,7 +65,7 @@ func (d *Downloader) Search(ctx context.Context, o SearchOptions) (_ []ReviewCan
 	}
 	defer func() { release(resultErr) }()
 	args := append(youtubeArgs(), "--skip-download", "--flat-playlist", "--dump-single-json", "--playlist-end", "8", "--socket-timeout", "10", "--", "ytsearch8:"+query)
-	cmd := exec.Command(d.Tools.YTDLP, args...)
+	cmd := exec.Command(ytdlp, args...)
 	cmd.Env = []string{"PATH=/usr/bin:/bin", "HOME=/nonexistent", "XDG_CONFIG_HOME=/nonexistent"}
 	var output limitedBuffer
 	output.max = 1 << 20

@@ -7,10 +7,12 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"path/filepath"
 	"time"
 
 	"github.com/crowquillx/silo-theme-songs/pkg/pluginapp"
 	"github.com/crowquillx/silo-theme-songs/pkg/provider"
+	"github.com/crowquillx/silo-theme-songs/pkg/tools"
 )
 
 type Options struct {
@@ -20,6 +22,7 @@ type Options struct {
 	YTDLP             string            `json:"yt_dlp"`
 	FFmpeg            string            `json:"ffmpeg"`
 	JSRuntime         string            `json:"js_runtime"`
+	ManageTools       *bool             `json:"manage_tools"` // nil means true
 	MaxBytes          int64             `json:"max_bytes"`
 	TimeoutSeconds    int               `json:"timeout_seconds"`
 	Types             []string          `json:"types"`
@@ -47,6 +50,11 @@ func New(c pluginapp.Config) (pluginapp.Provider, error) {
 		return nil, errors.New("invalid download size or time limit")
 	}
 	a := &App{opts: o, resolver: &provider.Resolver{DB: &provider.ThemerrDB{}, AllowedDirectHosts: o.Hosts}, downloader: &provider.Downloader{Tools: provider.ToolPaths{YTDLP: o.YTDLP, FFmpeg: provider.DefaultTool(o.FFmpeg, "ffmpeg"), FFprobe: provider.DefaultTool(c.FFprobe, "ffprobe"), JSRuntime: o.JSRuntime}, StageParent: c.StateDir, AllowedDirectHosts: o.Hosts, MaxBytes: o.MaxBytes, MaxDuration: time.Duration(o.TimeoutSeconds) * time.Second}}
+	// Silo's Docker image has no yt-dlp or JavaScript runtime; install them
+	// beneath the state directory unless the operator opts out.
+	if o.ManageTools == nil || *o.ManageTools {
+		a.downloader.Installer = &tools.Manager{Dir: filepath.Join(c.StateDir, "tools")}
+	}
 	return a, nil
 }
 func (a *App) Select(ctx context.Context, t pluginapp.Target) ([]pluginapp.Candidate, error) {

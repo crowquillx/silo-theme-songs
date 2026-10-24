@@ -11,6 +11,7 @@ import (
 	"net/url"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/crowquillx/silo-theme-songs/pkg/ratelimit"
@@ -89,9 +90,11 @@ type ScanSource struct {
 	} `json:"path_rewrites"`
 }
 type Client struct {
-	base         *url.URL
-	key, profile string
-	http         *http.Client
+	base    *url.URL
+	key     string
+	http    *http.Client
+	mu      sync.Mutex
+	profile string // empty until the primary profile is looked up
 }
 
 // New never follows redirects with the Silo credential. Plain HTTP is allowed
@@ -101,12 +104,45 @@ func New(base, key, profile string) (*Client, error) {
 	if e != nil || u.Host == "" || (u.Scheme != "http" && u.Scheme != "https") || u.User != nil || u.RawQuery != "" || u.Fragment != "" {
 		return nil, errors.New("invalid Silo base URL")
 	}
-	if key == "" || profile == "" {
-		return nil, errors.New("Silo API key and primary profile ID are required")
+	if key == "" {
+		return nil, errors.New("Silo API key is required")
 	}
-	return &Client{u, key, profile, &http.Client{Timeout: 30 * time.Second, Transport: ratelimit.Wrap(nil, ratelimit.SiloInterval), CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}}, nil
+	return &Client{base: u, key: key, profile: profile, http: &http.Client{Timeout: 30 * time.Second, Transport: ratelimit.Wrap(nil, ratelimit.SiloInterval), CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}}, nil
+}
+
+// profileID returns the configured profile, or the API key owner's primary
+// profile when none is configured.
+func (c *Client) profileID(ctx context.Context) (string, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.profile != "" {
+		return c.profile, nil
+	}
+	var v struct {
+		Items []struct {
+			ID      string `json:"id"`
+			Primary bool   `json:"is_primary"`
+		} `json:"items"`
+	}
+	if e := c.request(ctx, "/profiles", nil, "", &v); e != nil {
+		return "", e
+	}
+	for _, p := range v.Items {
+		if p.Primary && p.ID != "" {
+			c.profile = p.ID
+			return p.ID, nil
+		}
+	}
+	return "", errors.New("the API key's account has no primary profile; set profile_id")
 }
 func (c *Client) get(ctx context.Context, route string, q url.Values, out any) error {
+	profile, e := c.profileID(ctx)
+	if e != nil {
+		return e
+	}
+	return c.request(ctx, route, q, profile, out)
+}
+func (c *Client) request(ctx context.Context, route string, q url.Values, profile string, out any) error {
 	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
 	u := *c.base
@@ -118,7 +154,9 @@ func (c *Client) get(ctx context.Context, route string, q url.Values, out any) e
 			return errors.New("invalid Silo request")
 		}
 		r.Header.Set("Authorization", "Bearer "+c.key)
-		r.Header.Set("X-Profile-Id", c.profile)
+		if profile != "" {
+			r.Header.Set("X-Profile-Id", profile)
+		}
 		r.Header.Set("Accept", "application/json")
 		r.Header.Set("User-Agent", ratelimit.UserAgent)
 		resp, e := c.http.Do(r)

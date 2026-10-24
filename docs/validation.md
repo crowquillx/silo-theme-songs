@@ -33,3 +33,13 @@ On 2026-10-24, v0.1.7 failed every hosted Preview on a 37-movie library, while t
 Tasks now run detached from the RPC, which returns a `running` report one second before its deadline. The status page receives the final report. Repeated triggers join the active run, cancelling the task in Silo stops it, and reconfiguration cancels background runs. Against the same server, the hosted Preview listed all 37 movies through `127.0.0.1:8080` using the default bundled ffprobe and FFmpeg paths.
 
 That library's video files are symlinks to a remote mount, which v0.1.7 refused for every movie. Symlinks that are known catalog files are now accepted; any other symlink beneath an owner, including `theme-music`, is still refused, and dangling catalog links count as offline media. No downloads were run during this check because the server image does not include yt-dlp.
+
+## Managed tools and setup defaults in v0.1.9
+
+On 2026-10-24, the plugin installed yt-dlp 2026.10.21 (`yt-dlp_linux.zip`, the onedir build) and Deno 2.9.8 from GitHub in 5 seconds, using 184 MB. The onedir build starts in 0.25 seconds; the onefile build takes 0.53 seconds and unpacks into TMPDIR on every run, which the staging directory's size limit would count. The release signature verified against key AC0C BBE6 848D 6A87 3464 AF4E 57CF 6593 3B5A 7581. Through these copies, with no yt-dlp on PATH, the ThemerrDB source for TMDB series 1399 produced the same 2,574,764-byte MP3 as the v0.1.4 check.
+
+The previous Deno check expected `deno X.Y.Z`, but Deno 2 prints `deno 2.9.8 (stable, release, x86_64-unknown-linux-gnu)`, so every Deno runtime was reported missing. Earlier validation used Node.
+
+On the same server, a configuration with only an API key and two library IDs listed all 62 movies and series. The default profile, internal URL, state directory and library roots resolved inside Silo's container. Preview installed the managed tools there and planned one YouTube download. A Download run then reached YouTube and reported that the video had been removed. No file was written.
+
+Fixture tests cover signature rejection, checksum mismatch, links and escaping paths in archives, an unrecognized release version, daily checks, early checks after failures, keeping the installed copy while GitHub is unreachable and pruning old versions. A test also verifies the real 2026.10.21 checksum signature against the embedded key.

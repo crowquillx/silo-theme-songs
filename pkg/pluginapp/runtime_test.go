@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -16,6 +17,7 @@ import (
 	pluginv1 "github.com/Silo-Server/silo-plugin-sdk/pkg/pluginproto/silo/plugin/v1"
 	"github.com/crowquillx/silo-theme-songs/pkg/destinations"
 	"github.com/crowquillx/silo-theme-songs/pkg/provider"
+	"github.com/crowquillx/silo-theme-songs/pkg/siloapi"
 )
 
 type fakeProvider struct {
@@ -236,5 +238,66 @@ func TestRunOutlivesHostDeadline(t *testing.T) {
 	status, e := s.Handle(context.Background(), &pluginv1.HandleHTTPRequest{Method: "GET", Path: "/status"})
 	if e != nil || !strings.Contains(string(status.Body), `"state":"complete"`) {
 		t.Fatalf("status page lacks the background result: %s", status.GetBody())
+	}
+}
+
+func TestSettingsDefaults(t *testing.T) {
+	cache := t.TempDir()
+	t.Setenv("SILO_PLUGIN_CACHE_DIR", cache)
+	c := Defaults()
+	c.APIKey = "key"
+	c.LibraryIDs = []string{"1", "2"}
+	c = c.withDefaults(context.Background(), "test.plugin")
+	if e := c.Validate(); e != nil {
+		t.Fatal(e)
+	}
+	if c.siloURL != fallbackSiloURL || c.StateDir != filepath.Join(cache, "plugin-state", "test.plugin") {
+		t.Fatalf("defaults: %q %q", c.siloURL, c.StateDir)
+	}
+	if generation(c, siloapi.ScanSource{ID: "s"}) != generation(Config{SourceGeneration: "1"}, siloapi.ScanSource{ID: "s"}) {
+		t.Fatal("resolved URL changed the scan generation")
+	}
+	libs := []siloapi.Library{{ID: "1", Paths: []string{"/media/movies"}}, {ID: "2", Paths: []string{"/media/tv"}}, {ID: "3", Paths: []string{"/media/other"}}}
+	if p := c.policy(libs); !slices.Equal(p.AllowedRoots, []string{"/media/movies", "/media/tv"}) {
+		t.Fatalf("default roots %v", p.AllowedRoots)
+	}
+	c.Policy.Mounts = []destinations.Mount{{Server: "/media", Local: "/mnt/media"}}
+	if p := c.policy(libs); !slices.Equal(p.AllowedRoots, []string{"/mnt/media/movies", "/mnt/media/tv"}) {
+		t.Fatalf("mapped default roots %v", p.AllowedRoots)
+	}
+	c.Policy.AllowedRoots = []string{"/mnt/media/movies"}
+	if p := c.policy(libs); !slices.Equal(p.AllowedRoots, c.Policy.AllowedRoots) {
+		t.Fatal("explicit roots replaced")
+	}
+	t.Setenv("SILO_PLUGIN_CACHE_DIR", "")
+	bare := Defaults()
+	bare.APIKey, bare.LibraryIDs = "key", []string{"1"}
+	if e := bare.withDefaults(context.Background(), "test.plugin").Validate(); e == nil || !strings.Contains(e.Error(), "state_dir") {
+		t.Fatalf("missing state_dir accepted: %v", e)
+	}
+}
+
+func TestMissingLibrariesListsChoices(t *testing.T) {
+	h := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/v2/catalog/themes/capabilities":
+			fmt.Fprint(w, `{"state":"available"}`)
+		case "/api/v2/libraries":
+			fmt.Fprint(w, `{"items":[{"id":"3","name":"Shows","type":"series","enabled":true},{"id":"7","name":"Music","type":"music","enabled":true}]}`)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer h.Close()
+	s := New(&pluginv1.PluginManifest{PluginId: "test.plugin"}, "general", false, func(Config) (Provider, error) { return &fakeProvider{}, nil })
+	defer s.Close()
+	c := Defaults()
+	c.BaseURL, c.APIKey, c.ProfileID, c.StateDir, c.ManualRefresh = h.URL, "key", "primary", t.TempDir(), true
+	if e := s.ConfigureLocal(context.Background(), c); e != nil {
+		t.Fatal(e)
+	}
+	r := s.Execute(context.Background(), "preview")
+	if r.State != "prerequisite_failed" || len(r.Errors) != 1 || !strings.Contains(r.Errors[0], `"3" (Shows, series)`) || strings.Contains(r.Errors[0], "Music") {
+		t.Fatalf("library choices: %+v", r)
 	}
 }

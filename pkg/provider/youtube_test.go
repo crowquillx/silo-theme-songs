@@ -31,6 +31,10 @@ func TestJavaScriptRuntimePreflightAndArguments(t *testing.T) {
 			t.Fatalf("missing %q in %s", pair, args)
 		}
 	}
+	d.Tools.JSRuntime = "deno:" + script(t, t.TempDir(), "deno", "echo 'deno 2.9.8 (stable, release, x86_64-unknown-linux-gnu)'; echo 'v8 15.0.245.2-rusty'")
+	if v, err := d.Preflight(context.Background(), Source{Format: "mp3", Extract: true}); err != nil || v.JSRuntime != "deno 2.9.8" {
+		t.Fatalf("rejected Deno 2 version output: %+v %v", v, err)
+	}
 	for _, spec := range []string{"node:" + script(t, t.TempDir(), "old-node", "echo v20.19.0"), "deno:" + script(t, t.TempDir(), "old-deno", "echo 'deno 2.2.0'"), "node:/nonexistent/runtime", "bun"} {
 		d.Tools.JSRuntime = spec
 		if _, err := d.Preflight(context.Background(), Source{Format: "mp3", Extract: true}); !IsCode(err, MissingTool) {

@@ -50,10 +50,10 @@ func Within(root, path string) bool {
 func cleanAbs(p string) bool {
 	return filepath.IsAbs(p) && filepath.Clean(p) == p && p != "/" && !strings.ContainsRune(p, 0)
 }
+
+// Validate checks the settings. An empty AllowedRoots is valid here; the
+// caller supplies roots before Resolve.
 func (p Policy) Validate() error {
-	if len(p.AllowedRoots) == 0 {
-		return errors.New("allowed writable roots are required")
-	}
 	for _, r := range p.AllowedRoots {
 		if !cleanAbs(r) {
 			return errors.New("allowed roots must be normalized absolute non-root paths")
@@ -143,6 +143,9 @@ func video(path string) bool {
 func (p Policy) Resolve(inv siloapi.Inventory, item siloapi.Item, season *siloapi.Season) ([]Destination, error) {
 	if e := p.Validate(); e != nil {
 		return nil, e
+	}
+	if len(p.AllowedRoots) == 0 {
+		return nil, errors.New("allowed writable roots are required")
 	}
 	if reason := inv.Refusals[item.ID]; reason != "" {
 		return nil, errors.New(reason)

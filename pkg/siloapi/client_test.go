@@ -350,3 +350,35 @@ func TestCollectionQueryContractRejectsUnknownParameters(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+func TestMissingProfileUsesPrimaryProfile(t *testing.T) {
+	var lookups atomic.Int32
+	s := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/v2/profiles":
+			lookups.Add(1)
+			if r.Header.Get("X-Profile-Id") != "" {
+				t.Error("profile lookup sent a profile")
+			}
+			fmt.Fprint(w, `{"items":[{"id":"child","is_primary":false},{"id":"main","is_primary":true}]}`)
+		case "/api/v2/libraries":
+			if r.Header.Get("X-Profile-Id") != "main" {
+				t.Errorf("library read used profile %q", r.Header.Get("X-Profile-Id"))
+			}
+			fmt.Fprint(w, `{"items":[]}`)
+		}
+	}))
+	defer s.Close()
+	c, err := New(s.URL, "key", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for range 2 {
+		if _, err := c.Libraries(context.Background()); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if lookups.Load() != 1 {
+		t.Fatalf("%d profile lookups, want one", lookups.Load())
+	}
+}

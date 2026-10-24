@@ -1,9 +1,9 @@
-Theme Songs v0.1.8
+Theme Songs v0.1.9
 
-Fixes tasks that failed on real libraries with "Silo read rate limit exceeds remaining request budget". Silo allows each scheduled task call 10 seconds, and reading a library takes longer. Preview, Download and Reconcile now continue in the background after that call returns; the status page shows the result. A second trigger joins the task already running.
+YouTube themes now work on Silo's Docker image without installing anything. When no yt-dlp or JavaScript runtime is on PATH, the first YouTube download installs the official yt-dlp build and Deno 2.9.8 in the plugin's state directory. The plugin verifies the yt-dlp release signature and the Deno checksum, and it checks for a new yt-dlp release once a day or an hour after an extraction failure. Set `"manage_tools": false` in Provider settings to opt out.
 
-FFmpeg and ffprobe now default to Silo's Docker paths under `/usr/lib/jellyfin-ffmpeg`, falling back to PATH. Saved `ffmpeg` and `ffprobe` settings also find Silo's copy when PATH has none.
+Setup needs only an API key. The Silo URL, profile, state directory and writable roots now have defaults. Without library IDs, Preview lists your movie and series libraries with their IDs. The README install steps now cover the server restart Silo needs before plugin tasks appear and the read-only media mount in Silo's Docker Compose file.
 
-Media folders whose catalog video files are symlinks, as in debrid and rclone libraries, are no longer refused. Other symlinks are still refused, and the message names the file.
+Deno 2 runtimes were rejected because their version line changed format; they are accepted again. Removed or private YouTube videos now report "YouTube video is unavailable".
 
 Linux amd64 and arm64 binaries and checksums are attached.

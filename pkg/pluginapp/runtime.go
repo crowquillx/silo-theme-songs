@@ -153,11 +153,12 @@ func (s *Server) resetLocal() error {
 	s.repairPaths = nil
 	return err
 }
-func (s *Server) ConfigureLocal(_ context.Context, cfg Config) error {
+func (s *Server) ConfigureLocal(ctx context.Context, cfg Config) error {
+	cfg = cfg.withDefaults(ctx, s.manifest.GetPluginId())
 	if e := cfg.Validate(); e != nil {
 		return e
 	}
-	client, e := siloapi.New(cfg.BaseURL, cfg.APIKey, cfg.ProfileID)
+	client, e := siloapi.New(cfg.siloURL, cfg.APIKey, cfg.ProfileID)
 	if e != nil {
 		return e
 	}
@@ -320,6 +321,18 @@ func (s *Server) Execute(ctx context.Context, mode string) (report Report) {
 	if e != nil {
 		report.State = "prerequisite_failed"
 		report.Errors = append(report.Errors, e.Error())
+		return
+	}
+	c.Policy = c.policy(libs)
+	if len(c.LibraryIDs) == 0 {
+		report.State = "prerequisite_failed"
+		var choices []string
+		for _, l := range libs {
+			if siloapi.Eligible(l) {
+				choices = append(choices, fmt.Sprintf("%q (%s, %s)", l.ID, l.Name, l.Type))
+			}
+		}
+		report.Errors = append(report.Errors, "Set library_ids to the libraries to use, for example [\"1\"]. Movie and series libraries: "+strings.Join(choices, ", ")+".")
 		return
 	}
 	if host := sdkruntime.Host(); host != nil {
@@ -814,6 +827,7 @@ func revalidate(ctx context.Context, api *siloapi.Client, c Config, old destinat
 	if e != nil {
 		return e
 	}
+	c.Policy = c.policy(libs)
 	for _, lib := range libs {
 		if lib.ID != old.LibraryID || !lib.Enabled {
 			continue

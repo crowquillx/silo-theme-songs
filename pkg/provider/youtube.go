@@ -123,6 +123,8 @@ func extractorError(output []byte) error {
 		return &Error{AuthenticationRequired, "YouTube requires authentication; use an accessible selected source"}
 	case strings.Contains(text, "no supported javascript runtime"), strings.Contains(text, "challenge solving failed"), strings.Contains(text, "challenge solver"), strings.Contains(text, "yt-dlp-ejs"):
 		return &Error{MissingTool, "update yt-dlp with its EJS package and configure a supported js_runtime"}
+	case strings.Contains(text, "video is unavailable"), strings.Contains(text, "private video"), strings.Contains(text, "has been removed"), strings.Contains(text, "account associated with this video has been terminated"):
+		return &Error{UnavailableMedia, "YouTube video is unavailable"}
 	case strings.Contains(text, "http error 503"), strings.Contains(text, "http error 502"), strings.Contains(text, "http error 500"), strings.Contains(text, "timed out"), strings.Contains(text, "unable to download"), strings.Contains(text, "temporary failure"):
 		return &Error{Transient, "YouTube transport; retry later"}
 	default:

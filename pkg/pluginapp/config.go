@@ -5,8 +5,11 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"os"
 	"path/filepath"
+	"slices"
 
+	sdkruntime "github.com/Silo-Server/silo-plugin-sdk/pkg/pluginsdk/runtime"
 	"github.com/crowquillx/silo-theme-songs/pkg/destinations"
 	"github.com/crowquillx/silo-theme-songs/pkg/provider"
 	"github.com/crowquillx/silo-theme-songs/pkg/siloapi"
@@ -27,20 +30,80 @@ type Config struct {
 	MaxDownloads     int                 `json:"max_downloads"`
 	Policy           destinations.Policy `json:"destinations"`
 	Provider         json.RawMessage     `json:"provider"`
+
+	siloURL string // BaseURL, or the host's internal API URL when BaseURL is empty
 }
+
+// fallbackSiloURL is Silo's API listener inside its Docker image.
+const fallbackSiloURL = "http://127.0.0.1:8080"
 
 func Defaults() Config {
 	return Config{PreviewOnly: true, SourceGeneration: "1", MaxDownloads: 10, FFprobe: provider.BundledTool("ffprobe")}
 }
+
+// withDefaults fills settings Silo can supply. An empty state_dir uses
+// $SILO_PLUGIN_CACHE_DIR/plugin-state/<plugin>, which Silo's Docker image keeps
+// on its plugin volume.
+func (c Config) withDefaults(ctx context.Context, pluginID string) Config {
+	c.siloURL = c.BaseURL
+	if c.siloURL == "" {
+		c.siloURL = fallbackSiloURL
+		if host := sdkruntime.Host(); host != nil {
+			if info, e := host.GetHostInfo(ctx); e == nil && info.InternalBaseURL != "" {
+				c.siloURL = info.InternalBaseURL
+			}
+		}
+	}
+	if cache := os.Getenv("SILO_PLUGIN_CACHE_DIR"); c.StateDir == "" && filepath.IsAbs(cache) && pluginID != "" {
+		c.StateDir = filepath.Join(filepath.Clean(cache), "plugin-state", pluginID)
+	}
+	return c
+}
+
+// policy returns the destination policy for a run. Without allowed_roots,
+// the selected libraries' folders are the writable roots.
+func (c Config) policy(libs []siloapi.Library) destinations.Policy {
+	p := c.Policy
+	if len(p.AllowedRoots) > 0 {
+		return p
+	}
+	for _, l := range libs {
+		if !slices.Contains(c.LibraryIDs, l.ID) {
+			continue
+		}
+		for _, server := range l.Paths {
+			local := server
+			best := ""
+			for _, m := range p.Mounts {
+				if destinations.Within(m.Server, server) && len(m.Server) > len(best) {
+					rel, _ := filepath.Rel(m.Server, server)
+					best, local = m.Server, filepath.Join(m.Local, rel)
+				}
+			}
+			if !slices.Contains(p.AllowedRoots, local) {
+				p.AllowedRoots = append(p.AllowedRoots, local)
+			}
+		}
+	}
+	return p
+}
+
 func (c Config) Validate() error {
-	if _, e := siloapi.New(c.BaseURL, c.APIKey, c.ProfileID); e != nil {
+	url := c.siloURL
+	if url == "" {
+		url = c.BaseURL
+	}
+	if url == "" {
+		url = fallbackSiloURL
+	}
+	if _, e := siloapi.New(url, c.APIKey, c.ProfileID); e != nil {
 		return e
+	}
+	if c.StateDir == "" {
+		return errors.New("set state_dir to a persistent directory")
 	}
 	if !filepath.IsAbs(c.StateDir) || filepath.Clean(c.StateDir) != c.StateDir || c.StateDir == "/" {
 		return errors.New("persistent state_dir must be a normalized absolute directory")
-	}
-	if len(c.LibraryIDs) == 0 {
-		return errors.New("choose at least one library_id")
 	}
 	if len(c.LibraryIDs) > 100 {
 		return errors.New("at most 100 selected libraries")
