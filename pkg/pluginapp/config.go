@@ -88,8 +88,8 @@ func Defaults() Config {
 }
 
 // withDefaults fills settings Silo can supply. An empty state_dir uses
-// $SILO_PLUGIN_CACHE_DIR/plugin-state/<plugin>, which Silo's Docker image keeps
-// on its plugin volume.
+// plugin-state/<plugin> in Silo's plugin cache directory, which Silo's Docker
+// image keeps on its plugin volume.
 func (c Config) withDefaults(ctx context.Context, pluginID string) Config {
 	c.siloURL = c.BaseURL
 	if c.siloURL == "" {
@@ -100,10 +100,35 @@ func (c Config) withDefaults(ctx context.Context, pluginID string) Config {
 			}
 		}
 	}
-	if cache := os.Getenv("SILO_PLUGIN_CACHE_DIR"); c.StateDir == "" && filepath.IsAbs(cache) && pluginID != "" {
+	if cache := pluginCacheDir(pluginID); c.StateDir == "" && filepath.IsAbs(cache) && pluginID != "" {
 		c.StateDir = filepath.Join(filepath.Clean(cache), "plugin-state", pluginID)
 	}
 	return c
+}
+
+// pluginCacheDir returns $SILO_PLUGIN_CACHE_DIR, or "" when it can't be found.
+// Silo stopped passing that variable to plugin processes, so when it is unset
+// the directory is read from this binary's path.
+func pluginCacheDir(pluginID string) string {
+	if cache := os.Getenv("SILO_PLUGIN_CACHE_DIR"); cache != "" {
+		return cache
+	}
+	exe, e := os.Executable()
+	if e != nil {
+		return ""
+	}
+	return installedCacheDir(exe, pluginID)
+}
+
+// installedCacheDir returns the cache directory of a binary Silo installed at
+// <cache>/<plugin>/<version>/install-*/plugin, or "" for any other path.
+func installedCacheDir(exe, pluginID string) string {
+	install := filepath.Dir(filepath.Clean(exe))
+	plugin := filepath.Dir(filepath.Dir(install))
+	if pluginID == "" || filepath.Base(plugin) != pluginID || !strings.HasPrefix(filepath.Base(install), "install-") {
+		return ""
+	}
+	return filepath.Dir(plugin)
 }
 
 // policy returns the destination policy for a run. Without allowed_roots,

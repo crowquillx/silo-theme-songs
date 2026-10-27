@@ -285,6 +285,23 @@ func TestSettingsDefaults(t *testing.T) {
 	}
 }
 
+func TestInstalledCacheDir(t *testing.T) {
+	for exe, want := range map[string]string{
+		"/var/lib/silo/plugins/test.plugin/0.1.14/install-2598497015/plugin": "/var/lib/silo/plugins",
+		"/var/lib/silo/plugins/other.plugin/0.1.14/install-1/plugin":         "",
+		"/var/lib/silo/plugins/test.plugin/0.1.14/tmp/plugin":                "",
+		"/usr/local/bin/plugin": "",
+		"plugin":                "",
+	} {
+		if got := installedCacheDir(exe, "test.plugin"); got != want {
+			t.Errorf("installedCacheDir(%q) = %q, want %q", exe, got, want)
+		}
+	}
+	if got := installedCacheDir("/cache/test.plugin/1/install-1/plugin", ""); got != "" {
+		t.Errorf("empty plugin ID gave %q", got)
+	}
+}
+
 func TestMissingLibrariesListsChoices(t *testing.T) {
 	h := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {

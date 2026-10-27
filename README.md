@@ -27,7 +27,7 @@ Leave these empty unless your setup differs from Silo's Docker image.
 | --- | --- |
 | Silo base URL | Silo's internal API address |
 | Primary profile ID | The API key owner's primary profile |
-| Persistent state directory | `plugin-state/dev.crowquillx.theme-songs` in `SILO_PLUGIN_CACHE_DIR`, which is `/var/lib/silo/plugins` in Docker. Required when that variable is unset. |
+| Persistent state directory | `plugin-state/dev.crowquillx.theme-songs` in Silo's plugin cache directory, which is `/var/lib/silo/plugins` in Docker. Required when Silo installs the plugin outside that directory. |
 | Writable roots and path mappings | The selected libraries' folders |
 | ffprobe executable | `/usr/lib/jellyfin-ffmpeg/ffprobe`, then `ffprobe` on PATH |
 | Provider `ffmpeg` | `/usr/lib/jellyfin-ffmpeg/ffmpeg`, then `ffmpeg` on PATH |
