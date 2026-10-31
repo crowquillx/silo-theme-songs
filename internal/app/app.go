@@ -37,6 +37,7 @@ type App struct {
 	downloader *provider.Downloader
 }
 
+// New is the pluginapp.Factory for ThemerrDB, YouTube and direct audio.
 func New(c pluginapp.Config) (pluginapp.Provider, error) {
 	o := Options{YTDLP: "yt-dlp", FFmpeg: provider.BundledTool("ffmpeg"), MaxBytes: 80 << 20, TimeoutSeconds: 300, Types: []string{"series", "movie"}}
 	if len(c.Provider) > 0 {
@@ -45,6 +46,13 @@ func New(c pluginapp.Config) (pluginapp.Provider, error) {
 		if e := d.Decode(&o); e != nil {
 			return nil, errors.New("invalid Theme Songs provider settings")
 		}
+	}
+	// The settings form's switches override the provider JSON.
+	if c.ManageTools != nil {
+		o.ManageTools = c.ManageTools
+	}
+	if c.AssistedSearch != nil {
+		o.AssistedSearch = *c.AssistedSearch
 	}
 	if o.MaxBytes < 1 || o.MaxBytes > 512<<20 || o.TimeoutSeconds < 1 || o.TimeoutSeconds > 1200 {
 		return nil, errors.New("invalid download size or time limit")

@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -36,21 +37,13 @@ func publish(t *testing.T, e *Engine, d destinations.Destination, stage string) 
 	return r
 }
 
-func TestPublishJournalDiscoveryAndReconcile(t *testing.T) {
+func TestPublishAndExactDiscovery(t *testing.T) {
 	d, stage, stateDir := fixture(t)
 	e, err := Open(stateDir, "general")
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer e.Close()
-	baseline, err := e.Poll("source-v1", "", map[string][]string{"lib": {"/srv/media"}})
-	if err != nil || baseline.Ready || len(baseline.Events) != 0 {
-		t.Fatalf("baseline=%+v err=%v", baseline, err)
-	}
-	repeat, _ := e.Poll("source-v1", "", nil)
-	if repeat.NextMarker != baseline.NextMarker {
-		t.Fatal("empty-marker baseline moved")
-	}
 	r := publish(t, e, d, stage)
 	if r.Status != Published || r.Destination.LocalPath != d.LocalPath || r.Checksum == "" {
 		t.Fatalf("record=%+v", r)
@@ -58,19 +51,9 @@ func TestPublishJournalDiscoveryAndReconcile(t *testing.T) {
 	if _, err := os.Stat(filepath.Join(d.LocalPath, "theme-music", r.Filename)); err != nil {
 		t.Fatal(err)
 	}
-	if ready := e.Ready("source-v1"); ready {
-		t.Fatal("ready before marker echo")
-	}
-	page, err := e.Poll("source-v1", baseline.NextMarker, map[string][]string{"lib": {"/srv/media"}})
-	if err != nil || !page.Ready || len(page.Paths) != 1 || page.Paths[0] != d.ServerPath {
-		t.Fatalf("page=%+v err=%v", page, err)
-	}
-	if e.Records()[0].Status != Published {
-		t.Fatal("poll falsely marked discovery")
-	}
-	replayed, err := e.Poll("source-v1", baseline.NextMarker, map[string][]string{"lib": {"/srv/media"}})
-	if err != nil || replayed.NextMarker != page.NextMarker || len(replayed.Events) != 1 {
-		t.Fatalf("replay=%+v err=%v", replayed, err)
+	attempt, err := e.MarkAttempt(d, r.Filename, true)
+	if err != nil || attempt.Attempts != 1 || attempt.ScanRequests != 1 || attempt.LastAttempt.IsZero() || attempt.Status != Published {
+		t.Fatalf("attempt=%+v err=%v", attempt, err)
 	}
 	if _, err := e.MarkDiscovered(d, r.Filename, "wrong-owner", strings.TrimSuffix(r.Filename, ".mp3")); err == nil {
 		t.Fatal("wrong owner accepted")
@@ -83,12 +66,38 @@ func TestPublishJournalDiscoveryAndReconcile(t *testing.T) {
 	if err != nil || discovered.Status != Discovered {
 		t.Fatalf("discovery=%+v err=%v", discovered, err)
 	}
-	count, err := e.Reconcile(context.Background(), &d)
-	if err != nil || count != 1 || e.Records()[0].Status != Discovered {
-		t.Fatalf("reconcile=%d %v %+v", count, err, e.Records())
+	if _, err := e.MarkAttempt(d, r.Filename, false); err == nil {
+		t.Fatal("discovered theme counted another attempt")
 	}
 	if _, err := e.Publish(context.Background(), d, "tmdb:123", r.Filename, stage, func(context.Context) error { return nil }); err != nil {
 		t.Fatalf("idempotent publish: %v", err)
+	}
+}
+
+// Themes and theme-music get the default modes reduced by the umask, as
+// Jellyfin's theme plugins write them, so other media readers can read them.
+func TestPublishedThemeFollowsUmask(t *testing.T) {
+	umask := syscall.Umask(0o027)
+	defer syscall.Umask(umask)
+	d, stage, stateDir := fixture(t)
+	e, err := Open(stateDir, "general")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer e.Close()
+	r := publish(t, e, d, stage)
+	for path, want := range map[string]os.FileMode{
+		filepath.Join(d.LocalPath, "theme-music"):             0o750,
+		filepath.Join(d.LocalPath, "theme-music", r.Filename): 0o640,
+		filepath.Join(d.LocalPath, ownerMarker):               0o600,
+	} {
+		info, err := os.Stat(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := info.Mode().Perm(); got != want {
+			t.Errorf("%s mode %o, want %o", filepath.Base(path), got, want)
+		}
 	}
 }
 
@@ -149,9 +158,6 @@ func TestPendingCrashRecoveryAndStaleFreeze(t *testing.T) {
 	r := publish(t, e, d, stage)
 	e.mu.Lock()
 	e.state.Records[0].Status = Pending
-	e.state.Records[0].JournalSeq = 0
-	e.state.Events = nil
-	e.state.NextSeq = 0
 	err = e.save()
 	e.mu.Unlock()
 	if err != nil {
@@ -178,7 +184,7 @@ func TestPendingCrashRecoveryAndStaleFreeze(t *testing.T) {
 	}
 }
 
-func TestExplicitReconcileRestoresOnlyExactVerifiedStaleDestination(t *testing.T) {
+func TestRestoreOnlyExactVerifiedStaleDestination(t *testing.T) {
 	d, stage, stateDir := fixture(t)
 	e, err := Open(stateDir, "general")
 	if err != nil {
@@ -192,23 +198,19 @@ func TestExplicitReconcileRestoresOnlyExactVerifiedStaleDestination(t *testing.T
 	if err := e.MarkStale(d); err != nil {
 		t.Fatal(err)
 	}
-	before := e.state.NextSeq
-	if n, err := e.Reconcile(context.Background(), nil); err != nil || n != 0 {
-		t.Fatalf("nil recovered stale: n=%d err=%v", n, err)
-	}
 	changed := d
 	changed.Fingerprint = "different proof"
-	if n, err := e.Reconcile(context.Background(), &changed); err != nil || n != 0 {
+	if n, err := e.Restore(context.Background(), changed); err != nil || n != 0 {
 		t.Fatalf("changed proof recovered stale: n=%d err=%v", n, err)
 	}
-	if e.Records()[0].Status != Stale || e.state.NextSeq != before {
-		t.Fatal("stale record or journal changed without exact proof")
+	if e.Records()[0].Status != Stale {
+		t.Fatal("stale record changed without exact proof")
 	}
-	if n, err := e.Reconcile(context.Background(), &d); err != nil || n != 1 {
+	if n, err := e.Restore(context.Background(), d); err != nil || n != 1 {
 		t.Fatalf("exact proof failed recovery: n=%d err=%v", n, err)
 	}
 	restored := e.Records()[0]
-	if restored.Status != Published || restored.Attempts != 0 || !restored.LastAttempt.IsZero() || restored.JournalSeq != before+1 {
+	if restored.Status != Published || restored.Attempts != 0 || !restored.LastAttempt.IsZero() {
 		t.Fatalf("stale recovery record=%+v", restored)
 	}
 	if err := e.Close(); err != nil {
@@ -223,7 +225,7 @@ func TestExplicitReconcileRestoresOnlyExactVerifiedStaleDestination(t *testing.T
 	}
 }
 
-func TestExplicitReconcileNeverUnfreezesProtectedFile(t *testing.T) {
+func TestRestoreNeverUnfreezesProtectedFile(t *testing.T) {
 	d, stage, stateDir := fixture(t)
 	e, err := Open(stateDir, "general")
 	if err != nil {
@@ -238,7 +240,7 @@ func TestExplicitReconcileNeverUnfreezesProtectedFile(t *testing.T) {
 	if err := os.WriteFile(final, []byte("user changed it"), 0600); err != nil {
 		t.Fatal(err)
 	}
-	if n, err := e.Reconcile(context.Background(), &d); err != nil || n != 0 {
+	if n, err := e.Restore(context.Background(), d); err != nil || n != 0 {
 		t.Fatalf("changed audio recovered: n=%d err=%v", n, err)
 	}
 	if got := e.Records()[0].Status; got != Protected {
@@ -247,12 +249,12 @@ func TestExplicitReconcileNeverUnfreezesProtectedFile(t *testing.T) {
 	if err := os.WriteFile(final, []byte("fixture audio"), 0600); err != nil {
 		t.Fatal(err)
 	}
-	if n, err := e.Reconcile(context.Background(), &d); err != nil || n != 0 || e.Records()[0].Status != Protected {
+	if n, err := e.Restore(context.Background(), d); err != nil || n != 0 || e.Records()[0].Status != Protected {
 		t.Fatalf("protected record unfrozen: n=%d err=%v", n, err)
 	}
 }
 
-func TestExplicitReconcileRequiresOwnerMarker(t *testing.T) {
+func TestRestoreRequiresOwnerMarker(t *testing.T) {
 	d, stage, stateDir := fixture(t)
 	e, err := Open(stateDir, "general")
 	if err != nil {
@@ -263,19 +265,18 @@ func TestExplicitReconcileRequiresOwnerMarker(t *testing.T) {
 	if err := e.MarkStale(d); err != nil {
 		t.Fatal(err)
 	}
-	before := e.state.NextSeq
 	if err := os.Remove(filepath.Join(d.LocalPath, ownerMarker)); err != nil {
 		t.Fatal(err)
 	}
-	if n, err := e.Reconcile(context.Background(), &d); err != nil || n != 0 {
+	if n, err := e.Restore(context.Background(), d); err != nil || n != 0 {
 		t.Fatalf("markerless recovery: n=%d err=%v", n, err)
 	}
-	if e.Records()[0].Status != Protected || e.state.NextSeq != before {
-		t.Fatal("markerless stale file was requeued")
+	if e.Records()[0].Status != Protected {
+		t.Fatal("markerless stale file was restored")
 	}
 }
 
-func TestMultipleDiscoveredThemesAndExplicitReplay(t *testing.T) {
+func TestMultipleDiscoveredThemes(t *testing.T) {
 	d, stage, stateDir := fixture(t)
 	e, err := Open(stateDir, "animethemes")
 	if err != nil {
@@ -301,12 +302,8 @@ func TestMultipleDiscoveredThemesAndExplicitReplay(t *testing.T) {
 	if _, err := e.MarkDiscovered(d, second.Filename, d.OwnerID, strings.TrimSuffix(second.Filename, ".ogg")); err != nil {
 		t.Fatal(err)
 	}
-	before := e.state.NextSeq
-	if _, err := e.Check(context.Background(), d); err != nil {
-		t.Fatal(err)
-	}
-	if e.state.NextSeq != before {
-		t.Fatal("check emitted journal event")
+	if checked, err := e.Check(context.Background(), d); err != nil || len(checked) != 2 {
+		t.Fatalf("check=%+v err=%v", checked, err)
 	}
 	third, err := e.Publish(context.Background(), d, "anime:3", "animethemes-3-op2.ogg", stage, func(context.Context) error { return nil })
 	if err != nil {
@@ -416,145 +413,37 @@ func TestPublishRevalidationAndLockCancellation(t *testing.T) {
 	unlock()
 }
 
-func TestPollPaginationRepairAndSourceReset(t *testing.T) {
-	d, _, stateDir := fixture(t)
+// Versions before 0.2.0 kept an Autoscan journal in state.json.
+func TestLegacyJournalStateLoads(t *testing.T) {
+	d, stage, stateDir := fixture(t)
 	e, err := Open(stateDir, "general")
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer e.Close()
-	base, _ := e.Poll("v1", "", nil)
-	e.mu.Lock()
-	for i := 0; i < 102; i++ {
-		r := Record{LibraryID: "lib", ServerPath: filepath.Join(d.ServerPath, string(rune('a'+i/26)), string(rune('a'+i%26)))}
-		if _, err := e.appendEvent(r); err != nil {
-			t.Fatal(err)
-		}
-	}
-	e.state.NextSeq++
-	e.state.Events = append(e.state.Events, Event{Seq: e.state.NextSeq, LibraryID: "lib", ServerPath: "/outside/root", Created: time.Now().UTC()})
-	err = e.save()
-	e.mu.Unlock()
-	if err != nil {
-		t.Fatal(err)
-	}
-	allowed := map[string][]string{"lib": {"/srv/media"}}
-	page, err := e.Poll("v1", base.NextMarker, allowed)
-	if err != nil || len(page.Paths) != 100 {
-		t.Fatalf("first page=%d err=%v", len(page.Paths), err)
-	}
-	second, err := e.Poll("v1", page.NextMarker, allowed)
-	if err != nil || len(second.Paths) != 2 || len(second.Repair) != 1 {
-		t.Fatalf("second page=%+v err=%v", second, err)
-	}
-	reset, err := e.Poll("v2", "", allowed)
-	if err != nil {
-		t.Fatal(err)
-	}
-	ready, err := e.Poll("v2", reset.NextMarker, allowed)
-	if err != nil || len(ready.Paths) != 0 {
-		t.Fatalf("reset replayed history: %+v %v", ready, err)
-	}
-}
-
-func TestIssuedMarkerReplayIsExactAfterAppendAndRestart(t *testing.T) {
-	d, _, stateDir := fixture(t)
-	e, err := Open(stateDir, "general")
-	if err != nil {
-		t.Fatal(err)
-	}
-	base, err := e.Poll("v1", "", nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	e.mu.Lock()
-	_, err = e.appendEvent(Record{LibraryID: "lib", ServerPath: d.ServerPath})
-	if err == nil {
-		err = e.save()
-	}
-	e.mu.Unlock()
-	if err != nil {
-		t.Fatal(err)
-	}
-	allowed := map[string][]string{"lib": {"/srv/media"}}
-	first, err := e.Poll("v1", base.NextMarker, allowed)
-	if err != nil || len(first.Events) != 1 {
-		t.Fatalf("first=%+v err=%v", first, err)
-	}
-	e.mu.Lock()
-	_, err = e.appendEvent(Record{LibraryID: "lib", ServerPath: d.ServerPath + "/new"})
-	if err == nil {
-		err = e.save()
-	}
-	e.mu.Unlock()
-	if err != nil {
-		t.Fatal(err)
-	}
+	r := publish(t, e, d, stage)
 	e.Close()
+	data, err := os.ReadFile(filepath.Join(stateDir, "state.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	legacy := strings.Replace(string(data), `"records":`, `"next_seq":4,"pruned_through":1,"events":[{"seq":4,"library_id":"lib","server_path":"/srv/media/Example","created":"2026-10-01T00:00:00Z"}],"generations":{"g":{"baseline":1,"ready":true}},"issued":{},"repair":[],"records":`, 1)
+	if err := os.WriteFile(filepath.Join(stateDir, "state.json"), []byte(legacy), 0600); err != nil {
+		t.Fatal(err)
+	}
 	e, err = Open(stateDir, "general")
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer e.Close()
-	replay, err := e.Poll("v1", base.NextMarker, allowed)
-	if err != nil || replay.NextMarker != first.NextMarker || len(replay.Events) != 1 || replay.Paths[0] != d.ServerPath {
-		t.Fatalf("replay changed: %+v err=%v", replay, err)
+	if records := e.Records(); len(records) != 1 || records[0].Filename != r.Filename || records[0].Status != Published {
+		t.Fatalf("legacy records=%+v", records)
 	}
-	if _, err := e.Poll("v1", base.NextMarker, map[string][]string{"lib": {"/other"}}); err == nil {
-		t.Fatal("cached path escaped changed library roots")
-	}
-	next, err := e.Poll("v1", first.NextMarker, allowed)
-	if err != nil || len(next.Events) != 1 || next.Paths[0] != d.ServerPath+"/new" {
-		t.Fatalf("next=%+v err=%v", next, err)
-	}
-	if _, err := e.Poll("v1", strings.Repeat("a", 48), allowed); err == nil {
-		t.Fatal("forged marker accepted")
-	}
-	reset, err := e.Poll("v2", first.NextMarker, allowed)
-	if err != nil || reset.Ready || len(reset.Paths) != 0 || reset.NextMarker == "" || e.Ready("v2") {
-		t.Fatalf("generation reset did not establish an empty baseline: %+v %v", reset, err)
-	}
-	retry, err := e.Poll("v2", first.NextMarker, allowed)
-	if err != nil || retry.NextMarker != reset.NextMarker || retry.Ready || len(retry.Paths) != 0 {
-		t.Fatalf("generation reset retry changed: %+v %v", retry, err)
-	}
-	acknowledged, err := e.Poll("v2", reset.NextMarker, allowed)
-	if err != nil || !acknowledged.Ready || len(acknowledged.Paths) != 0 {
-		t.Fatalf("generation baseline not acknowledged: %+v %v", acknowledged, err)
-	}
-	if _, err := e.Poll("v2", first.NextMarker, allowed); err == nil {
-		t.Fatal("cross-generation marker acknowledged after reset completed")
-	}
-}
-
-func TestEmptyPollIssuesFreshMarker(t *testing.T) {
-	d, _, stateDir := fixture(t)
-	e, err := Open(stateDir, "general")
-	if err != nil {
+	if _, err := e.MarkAttempt(d, r.Filename, false); err != nil {
 		t.Fatal(err)
 	}
-	defer e.Close()
-	base, _ := e.Poll("v1", "", nil)
-	empty, err := e.Poll("v1", base.NextMarker, map[string][]string{"lib": {"/srv/media"}})
-	if err != nil || empty.NextMarker == base.NextMarker {
-		t.Fatalf("no fresh marker: %+v %v", empty, err)
-	}
-	e.mu.Lock()
-	_, err = e.appendEvent(Record{LibraryID: "lib", ServerPath: d.ServerPath})
-	if err == nil {
-		err = e.save()
-	}
-	e.mu.Unlock()
-	if err != nil {
-		t.Fatal(err)
-	}
-	retry, _ := e.Poll("v1", base.NextMarker, map[string][]string{"lib": {"/srv/media"}})
-	if retry.NextMarker != empty.NextMarker || len(retry.Events) != 0 {
-		t.Fatal("empty response changed on retry")
-	}
-	newPage, err := e.Poll("v1", empty.NextMarker, map[string][]string{"lib": {"/srv/media"}})
-	if err != nil || len(newPage.Events) != 1 {
-		t.Fatalf("new event stranded: %+v %v", newPage, err)
+	data, _ = os.ReadFile(filepath.Join(stateDir, "state.json"))
+	if strings.Contains(string(data), "generations") || strings.Contains(string(data), "events") {
+		t.Fatalf("legacy journal kept after save: %s", data)
 	}
 }
 

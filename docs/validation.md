@@ -1,6 +1,6 @@
 # Compatibility checks
 
-Validated on 2026-09-24 against the server and SDK commits recorded in [compatibility.json](compatibility.json), using a disposable PostgreSQL database and generated video fixtures. The initial installation and ownership checks were followed by a full YouTube download and synthetic-item playback check for v0.1.4.
+Validated on 2026-09-24 against the server and SDK commits recorded for v0.1.4, using a disposable PostgreSQL database and generated video fixtures. The initial installation and ownership checks were followed by a full YouTube download and synthetic-item playback check for v0.1.4.
 
 - Both raw plugin binaries installed through the native upload API. Configuration, admin status routes, RuntimeHost access and scheduled tasks worked.
 - An unscoped administrator API key with explicit primary-profile context read catalog membership and file paths. A scoped library-read key received authorization denials on required routes.
@@ -55,3 +55,18 @@ On 2026-10-24, two items were refused because Silo's admin file list (`media_fil
 A hosted Preview of 62 items showed live progress on the status page while keeping the previous report, and the final report included a summary of all rows. Silo's plugin host logs plugin stderr through hclog at Info to the container's stderr, and parses hclog JSON lines at their level. The plugin now writes those JSON lines. Silo's Logs page does not show plugin output.
 
 Revalidation before publication and during Reconcile previously read the whole library for each record. It now reads one item; the resolver still refuses unknown videos under the owner folder, which covers files of other items there.
+
+## One plugin with automatic runs in v0.2.0
+
+On 2026-10-31 the plugin ran in Silo's `ghcr.io/silo-server/silo-server:aio` image built from the commit recorded in [compatibility.json](compatibility.json), with SDK v0.32.0. That commit differs from Silo's main branch of the same day only in scanner probe and book code. The fixture held one movie and two series, matched through `{tmdb-…}` and `{tvdb-…}` folder names, and the plugin binary was installed through the native upload API.
+
+- Before any settings were saved, opening the plugin's page started it. Configure succeeded and the page showed the setup step with links to API Keys and the settings.
+- The settings form came through with its four sections, the collapsed Advanced section, defaults and the AnimeThemes switches' conditions. Saving only the API key stored the defaults and dropped the blank fields.
+- With media mounted read-only, the first automatic run refused both libraries with the mount path and the `:ro` fix, and did not count as the day's full run.
+- With media writable, a run installed yt-dlp 2026.10.26 and downloaded The Matrix and Breaking Bad from ThemerrDB. After each download the plugin asked Silo to scan the theme file (`POST /api/v2/scan` with the API key). Silo listed each theme under its exact owner within the first check, so no Autoscan source or library scan was needed.
+- Cowboy Bebop mapped to AniDB 23 and went to AnimeThemes. AnimeThemes had changed its audio `filename` to omit the extension, which AnimeThemes 0.1.13 rejected for every theme; the plugin now reads `basename`. OP1 and ED1 were converted to MP3 in `Season 01`. The second theme waited for Silo to list the first, which took one check, so both arrived in one run.
+- Adding a movie and scanning its library delivered `scan_complete` with the library ID as `{"raw": "1"}`. A minute later the plugin ran for that one item and downloaded its theme. The scan the plugin then requested for the new theme found no new items and started no run.
+- The page's library checkboxes saved the unchecked library as `skip_library_ids` through `SetGlobalConfigEntry`. The stored API key was kept, and Silo read the saved entry back when the settings were next saved.
+- With the AnimeThemes 0.1.13 plugin installed and enabled, Theme Songs showed its notice and left the anime series alone, opening its own AnimeThemes state only to see what it manages. After uninstalling it, the next run managed all five themes again.
+- `RuntimeHost.ListLibraries` reports music and other non-video libraries as `mixed`, so the page lists libraries through the API key instead.
+- The live run wrote themes as `0600`, readable only by Silo's user. Themes and `theme-music` folders now get modes 0666 and 0777 reduced by the umask, as Jellyfin's Theme Songs and AnimeThemes plugins write them; a unit test covers this.

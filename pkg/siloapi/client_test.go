@@ -2,6 +2,7 @@ package siloapi
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
@@ -316,11 +317,6 @@ func TestCollectionQueryContractRejectsUnknownParameters(t *testing.T) {
 		case "/api/v2/admin/items/movie-item/files":
 			want = url.Values{"limit": {"100"}}
 			body = `{"items":[{"id":"movie-file","library_id":"movie","file_path":"/media/Movie/movie.mkv"}],"page":{"has_more":false}}`
-		case "/api/v2/admin/autoscan/settings":
-			body = `{"enabled":true}`
-		case "/api/v2/admin/autoscan/sources":
-			want = url.Values{"limit": {"100"}}
-			body = `{"items":[{"id":"source","plugin_id":"plugin","capability_id":"themes","enabled":true,"delivery_mode":"poll"}],"page":{"has_more":false}}`
 		default:
 			t.Errorf("unexpected route %s", r.URL.Path)
 			http.NotFound(w, r)
@@ -346,8 +342,54 @@ func TestCollectionQueryContractRejectsUnknownParameters(t *testing.T) {
 			t.Fatalf("%s inventory: %+v, %v", kind, inv, err)
 		}
 	}
-	if _, err := client.ScanSource(context.Background(), "plugin"); err != nil {
+	ids, err := client.ItemIDs(context.Background(), Library{ID: "series", Type: "series"})
+	if err != nil || !reflect.DeepEqual(ids, []string{"series-item"}) {
+		t.Fatalf("item IDs: %v, %v", ids, err)
+	}
+	inv, err := client.InventoryItems(context.Background(), Library{ID: "movie", Type: "movie"}, []string{"movie-item"}, nil)
+	if err != nil || len(inv.Items) != 1 || len(inv.Files) != 1 {
+		t.Fatalf("listed inventory: %+v, %v", inv, err)
+	}
+}
+
+func TestRequestScanPostsOncePerCall(t *testing.T) {
+	var posts atomic.Int32
+	status := http.StatusAccepted
+	s := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/v2/scan" || r.Method != http.MethodPost {
+			t.Errorf("unexpected %s %s", r.Method, r.URL.Path)
+			http.NotFound(w, r)
+			return
+		}
+		posts.Add(1)
+		var body map[string]string
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil || body["library_id"] != "3" || body["path"] != "/media/Movie/theme-music/a.mp3" {
+			t.Errorf("scan body %v, %v", body, err)
+		}
+		if r.Header.Get("Authorization") != "Bearer key" || r.Header.Get("X-Profile-Id") != "profile" || r.Header.Get("Content-Type") != "application/json" {
+			t.Error("scan request headers")
+		}
+		w.WriteHeader(status)
+		fmt.Fprint(w, `{"status":"accepted","mode":"file","library_id":"3"}`)
+	}))
+	defer s.Close()
+	c, err := New(s.URL, "key", "profile")
+	if err != nil {
 		t.Fatal(err)
+	}
+	if err := c.RequestScan(context.Background(), "3", "/media/Movie/theme-music/a.mp3"); err != nil {
+		t.Fatal(err)
+	}
+	status = http.StatusNotFound
+	if err := c.RequestScan(context.Background(), "3", "/media/Movie/theme-music/a.mp3"); !errors.Is(err, ErrScanUnavailable) {
+		t.Fatalf("missing route: %v", err)
+	}
+	status = http.StatusServiceUnavailable
+	if err := c.RequestScan(context.Background(), "3", "/media/Movie/theme-music/a.mp3"); err == nil || errors.Is(err, ErrScanUnavailable) {
+		t.Fatalf("server error: %v", err)
+	}
+	if posts.Load() != 3 {
+		t.Fatalf("%d scan posts, want 3 without retries", posts.Load())
 	}
 }
 

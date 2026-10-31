@@ -1,7 +1,9 @@
-// Package siloapi implements the read-only native V2 catalog contract.
+// Package siloapi implements the native V2 catalog contract the plugin reads,
+// plus the scan request it makes after publishing a theme.
 package siloapi
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -82,17 +84,6 @@ type Inventory struct {
 	// by an upgrade, so the resolver checks whether each still exists.
 	Unmatched map[string][]File
 }
-type ScanSource struct {
-	ID           string `json:"id"`
-	PluginID     string `json:"plugin_id"`
-	CapabilityID string `json:"capability_id"`
-	Enabled      bool   `json:"enabled"`
-	DeliveryMode string `json:"delivery_mode"`
-	Rewrites     []struct {
-		From string `json:"from"`
-		To   string `json:"to"`
-	} `json:"path_rewrites"`
-}
 type Client struct {
 	base    *url.URL
 	key     string
@@ -146,23 +137,32 @@ func (c *Client) get(ctx context.Context, route string, q url.Values, out any) e
 	}
 	return c.request(ctx, route, q, profile, out)
 }
-func (c *Client) request(ctx context.Context, route string, q url.Values, profile string, out any) error {
-	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
-	defer cancel()
+func (c *Client) url(route string, q url.Values) url.URL {
 	u := *c.base
 	u.Path = strings.TrimRight(u.Path, "/") + "/api/v2" + route
 	u.RawQuery = q.Encode()
+	return u
+}
+
+func (c *Client) headers(r *http.Request, profile string) {
+	r.Header.Set("Authorization", "Bearer "+c.key)
+	if profile != "" {
+		r.Header.Set("X-Profile-Id", profile)
+	}
+	r.Header.Set("Accept", "application/json")
+	r.Header.Set("User-Agent", ratelimit.UserAgent)
+}
+
+func (c *Client) request(ctx context.Context, route string, q url.Values, profile string, out any) error {
+	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+	u := c.url(route, q)
 	for attempt := 0; attempt < 3; attempt++ {
 		r, e := http.NewRequestWithContext(ctx, http.MethodGet, u.String(), nil)
 		if e != nil {
 			return errors.New("invalid Silo request")
 		}
-		r.Header.Set("Authorization", "Bearer "+c.key)
-		if profile != "" {
-			r.Header.Set("X-Profile-Id", profile)
-		}
-		r.Header.Set("Accept", "application/json")
-		r.Header.Set("User-Agent", ratelimit.UserAgent)
+		c.headers(r, profile)
 		resp, e := c.http.Do(r)
 		if e != nil {
 			if ctx.Err() != nil {
@@ -248,40 +248,50 @@ func pages[T any](ctx context.Context, c *Client, path string, q url.Values, pag
 func (c *Client) Libraries(ctx context.Context) ([]Library, error) {
 	return pages[Library](ctx, c, "/libraries", nil, false)
 }
-func (c *Client) ScanSource(ctx context.Context, plugin string) (ScanSource, error) {
-	var settings struct {
-		Enabled bool `json:"enabled"`
-	}
-	if e := c.get(ctx, "/admin/autoscan/settings", nil, &settings); e != nil {
-		return ScanSource{}, e
-	}
-	if !settings.Enabled {
-		return ScanSource{}, errors.New("Autoscan is disabled")
-	}
-	sources, e := pages[ScanSource](ctx, c, "/admin/autoscan/sources", nil, true)
+
+// ErrScanUnavailable means this Silo cannot take scan requests through the
+// API, either because it predates them or because it has no scanner.
+var ErrScanUnavailable = errors.New("Silo does not accept scan requests through its API")
+
+// RequestScan asks Silo to scan one file or folder of a library. Silo answers
+// before the scan runs. The request is not retried: Silo marks it
+// non-retryable, and a later discovery check asks again.
+func (c *Client) RequestScan(ctx context.Context, libraryID, path string) error {
+	profile, e := c.profileID(ctx)
 	if e != nil {
-		return ScanSource{}, e
+		return e
 	}
-	var matches []ScanSource
-	for _, s := range sources {
-		if s.PluginID == plugin && s.CapabilityID == "themes" && s.Enabled {
-			matches = append(matches, s)
+	body, e := json.Marshal(map[string]string{"library_id": libraryID, "path": path})
+	if e != nil {
+		return e
+	}
+	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+	u := c.url("/scan", nil)
+	r, e := http.NewRequestWithContext(ctx, http.MethodPost, u.String(), bytes.NewReader(body))
+	if e != nil {
+		return errors.New("invalid Silo request")
+	}
+	c.headers(r, profile)
+	r.Header.Set("Content-Type", "application/json")
+	resp, e := c.http.Do(r)
+	if e != nil {
+		if ctx.Err() != nil {
+			return ctx.Err()
 		}
+		return errors.New("Silo scan request failed")
 	}
-	if len(matches) != 1 {
-		return ScanSource{}, errors.New("enable exactly one themes Autoscan source for this plugin")
+	_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 64<<10))
+	resp.Body.Close()
+	switch {
+	case resp.StatusCode == http.StatusAccepted || resp.StatusCode == http.StatusOK:
+		return nil
+	case resp.StatusCode == http.StatusNotFound || resp.StatusCode == http.StatusMethodNotAllowed || resp.StatusCode == http.StatusNotImplemented:
+		return ErrScanUnavailable
 	}
-	s := matches[0]
-	if s.DeliveryMode != "poll" {
-		return s, errors.New("theme source requires poll delivery")
-	}
-	for _, r := range s.Rewrites {
-		if r.From != r.To {
-			return s, errors.New("theme source returns server paths; use only identity path rewrites")
-		}
-	}
-	return s, nil
+	return fmt.Errorf("Silo scan request returned HTTP %d", resp.StatusCode)
 }
+
 func Eligible(l Library) bool {
 	switch l.Type {
 	case "movie", "movies", "tv", "series", "mixed":
@@ -337,6 +347,40 @@ func (c *Client) InventoryProgress(ctx context.Context, lib Library, progress fu
 		}
 		seen[row.ID] = true
 		if e := c.addItem(ctx, &inv, row.ID, filesSeen); e != nil {
+			return inv, e
+		}
+	}
+	return inv, nil
+}
+
+// ItemIDs lists the movies and series in a library without reading them.
+func (c *Client) ItemIDs(ctx context.Context, lib Library) ([]string, error) {
+	rows, e := pages[Item](ctx, c, "/catalog", url.Values{"library_id": {lib.ID}, "sort": {"title"}}, true)
+	if e != nil {
+		return nil, e
+	}
+	ids := make([]string, 0, len(rows))
+	for _, row := range rows {
+		if row.Type == "movie" || row.Type == "series" {
+			ids = append(ids, row.ID)
+		}
+	}
+	return ids, nil
+}
+
+// InventoryItems reads the listed items of a library and reports each item
+// read. Unknown IDs fail the read.
+func (c *Client) InventoryItems(ctx context.Context, lib Library, ids []string, progress func(done, total int)) (Inventory, error) {
+	inv := newInventory(lib)
+	if !Eligible(lib) {
+		return inv, errors.New("unsupported library kind")
+	}
+	filesSeen := map[string]bool{}
+	for i, id := range ids {
+		if progress != nil {
+			progress(i, len(ids))
+		}
+		if e := c.addItem(ctx, &inv, id, filesSeen); e != nil {
 			return inv, e
 		}
 	}

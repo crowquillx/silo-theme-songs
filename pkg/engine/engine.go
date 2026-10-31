@@ -1,5 +1,6 @@
-// Package engine durably publishes validated theme audio and journals scan
-// requests. It requires a fresh destination proof from the caller.
+// Package engine durably publishes validated theme audio and tracks each
+// published file until Silo lists it. It requires a fresh destination proof
+// from the caller.
 package engine
 
 import (
@@ -24,7 +25,6 @@ import (
 const protocol = 1
 const maxAudioBytes int64 = 512 << 20
 const maxRecords = 10000
-const maxEvents = 10000
 
 type Status string
 
@@ -50,52 +50,19 @@ type Record struct {
 	Checksum    string                   `json:"checksum"`
 	Size        int64                    `json:"size"`
 	Status      Status                   `json:"status"`
-	Attempts    int                      `json:"attempts"`
-	LastAttempt time.Time                `json:"last_attempt"`
-	JournalSeq  uint64                   `json:"journal_seq"`
-	Updated     time.Time                `json:"updated"`
+	// Attempts counts discovery checks; LastAttempt is the latest one.
+	// ScanRequests counts the checks that also asked Silo to scan the file.
+	Attempts     int       `json:"attempts"`
+	LastAttempt  time.Time `json:"last_attempt"`
+	ScanRequests int       `json:"scan_requests,omitempty"`
+	Updated      time.Time `json:"updated"`
 }
 
-type Event struct {
-	Seq        uint64    `json:"seq"`
-	LibraryID  string    `json:"library_id"`
-	ServerPath string    `json:"server_path"`
-	Created    time.Time `json:"created"`
-}
-
-type PollResult struct {
-	Events      []Event  `json:"events"`
-	Paths       []string `json:"paths"`
-	NextMarker  string   `json:"next_marker"`
-	Ready       bool     `json:"ready"`
-	Repair      []Event  `json:"repair"`
-	RepairCount int      `json:"repair_count"`
-}
-
-type generationState struct {
-	Baseline       uint64    `json:"baseline"`
-	BaselineMarker string    `json:"baseline_marker"`
-	Ready          bool      `json:"ready"`
-	Acknowledged   uint64    `json:"acknowledged"`
-	LastSeen       time.Time `json:"last_seen"`
-}
-
+// state is saved as state.json. Versions before 0.2.0 also saved an Autoscan
+// journal there; Open ignores it and the next save drops it.
 type state struct {
-	Version       int                        `json:"version"`
-	NextSeq       uint64                     `json:"next_seq"`
-	PrunedThrough uint64                     `json:"pruned_through"`
-	Records       []Record                   `json:"records"`
-	Events        []Event                    `json:"events"`
-	Generations   map[string]generationState `json:"generations"`
-	Issued        map[string]issuedMarker    `json:"issued"`
-	Repair        []Event                    `json:"repair"`
-}
-
-type issuedMarker struct {
-	Generation string      `json:"generation"`
-	Cursor     uint64      `json:"cursor"`
-	Created    time.Time   `json:"created"`
-	Response   *PollResult `json:"response,omitempty"`
+	Version int      `json:"version"`
+	Records []Record `json:"records"`
 }
 
 type Engine struct {
@@ -142,7 +109,7 @@ func Open(stateDir, provider string) (*Engine, error) {
 	e := &Engine{root: root, lock: lock, provider: provider}
 	f, err := root.OpenFile("state.json", os.O_RDONLY|syscall.O_NOFOLLOW, 0)
 	if errors.Is(err, os.ErrNotExist) {
-		e.state = state{Version: protocol, Generations: map[string]generationState{}, Issued: map[string]issuedMarker{}}
+		e.state = state{Version: protocol}
 		return e, nil
 	}
 	if err != nil {
@@ -164,12 +131,9 @@ func Open(stateDir, provider string) (*Engine, error) {
 		e.Close()
 		return nil, err
 	}
-	if len(data) > 16<<20 || json.Unmarshal(data, &e.state) != nil || e.state.Version != protocol || e.state.Generations == nil || len(e.state.Records) > maxRecords || len(e.state.Events) > maxEvents || len(e.state.Issued) > maxEvents {
+	if len(data) > 16<<20 || json.Unmarshal(data, &e.state) != nil || e.state.Version != protocol || len(e.state.Records) > maxRecords {
 		e.Close()
 		return nil, errors.New("invalid engine state")
-	}
-	if e.state.Issued == nil {
-		e.state.Issued = map[string]issuedMarker{}
 	}
 	return e, nil
 }
@@ -290,16 +254,6 @@ func validFilename(name string) bool {
 	return namePattern.MatchString(name) && !strings.HasPrefix(name, ".") && !strings.HasPrefix(name, "theme.")
 }
 
-func (e *Engine) appendEvent(r Record) (uint64, error) {
-	if len(e.state.Events) >= maxEvents {
-		return 0, errors.New("scan journal full")
-	}
-	e.state.NextSeq++
-	seq := e.state.NextSeq
-	e.state.Events = append(e.state.Events, Event{Seq: seq, LibraryID: r.LibraryID, ServerPath: r.ServerPath, Created: time.Now().UTC()})
-	return seq, nil
-}
-
 func (e *Engine) Publish(ctx context.Context, dest destinations.Destination, sourceID, filename, stagedPath string, revalidate func(context.Context) error) (Record, error) {
 	if err := validDestination(dest); err != nil {
 		return Record{}, err
@@ -332,9 +286,6 @@ func (e *Engine) Publish(ctx context.Context, dest destinations.Destination, sou
 	}
 	if err := ctx.Err(); err != nil {
 		return Record{}, err
-	}
-	if len(e.state.Events) >= maxEvents {
-		return Record{}, errors.New("engine state full")
 	}
 	key := recordKey(Record{LibraryID: dest.LibraryID, LocalPath: dest.LocalPath, Filename: filename})
 	replaceIndex := -1
@@ -428,19 +379,11 @@ func (e *Engine) Publish(ctx context.Context, dest destinations.Destination, sou
 		return Record{}, err
 	}
 	i := e.find(key)
-	seq, err := e.appendEvent(r)
-	if err != nil {
-		return Record{}, err
-	}
 	r.Status = Published
-	r.JournalSeq = seq
 	r.Updated = time.Now().UTC()
 	e.state.Records[i] = r
 	if err := e.save(); err != nil {
 		e.state.Records[i].Status = Pending
-		e.state.Records[i].JournalSeq = 0
-		e.state.Events = e.state.Events[:len(e.state.Events)-1]
-		e.state.NextSeq--
 		return Record{}, err
 	}
 	return r, nil

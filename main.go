@@ -2,6 +2,8 @@ package main
 
 import (
 	_ "embed"
+
+	"github.com/crowquillx/silo-theme-songs/internal/anime"
 	"github.com/crowquillx/silo-theme-songs/internal/app"
 	"github.com/crowquillx/silo-theme-songs/pkg/pluginapp"
 )
@@ -10,4 +12,4 @@ import (
 var manifestJSON []byte
 var version string
 
-func main() { pluginapp.Main(manifestJSON, version, "general", false, app.New) }
+func main() { pluginapp.Main(manifestJSON, version, app.New, anime.New) }

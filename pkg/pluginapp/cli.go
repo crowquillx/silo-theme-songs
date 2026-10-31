@@ -15,7 +15,9 @@ import (
 	"google.golang.org/protobuf/encoding/protojson"
 )
 
-func Main(data []byte, version, name string, anime bool, f Factory) {
+// Main serves the plugin to Silo, or runs one task from the command line.
+// anime may be nil for a build without AnimeThemes.
+func Main(data []byte, version string, general, anime Factory) {
 	m, e := manifest.LoadWithChecksum(data, version)
 	if e != nil {
 		fmt.Fprintln(os.Stderr, e)
@@ -30,7 +32,7 @@ func Main(data []byte, version, name string, anime bool, f Factory) {
 		fmt.Println(string(b))
 		return
 	}
-	s := New(m, name, anime, f)
+	s := New(m, general, anime)
 	// Silo copies plugin stderr into its log and reads hclog JSON lines at
 	// their level; other lines become debug messages.
 	level := hclog.LevelFromString(os.Getenv("SILO_THEME_LOG_LEVEL"))
@@ -39,8 +41,8 @@ func Main(data []byte, version, name string, anime bool, f Factory) {
 	}
 	s.log = hclog.New(&hclog.LoggerOptions{Name: m.GetPluginId(), Level: level, Output: os.Stderr, JSONFormat: len(os.Args) == 1})
 	if len(os.Args) > 1 {
-		if len(os.Args) != 3 || (os.Args[1] != "preview" && os.Args[1] != "sync" && os.Args[1] != "reconcile") {
-			fmt.Fprintln(os.Stderr, "usage: plugin [manifest | preview CONFIG.json | sync CONFIG.json | reconcile CONFIG.json]")
+		if len(os.Args) != 3 || (os.Args[1] != "preview" && os.Args[1] != "sync") {
+			fmt.Fprintln(os.Stderr, "usage: plugin [manifest | preview CONFIG.json | sync CONFIG.json]")
 			os.Exit(2)
 		}
 		data, e := os.ReadFile(os.Args[2])
@@ -61,7 +63,7 @@ func Main(data []byte, version, name string, anime bool, f Factory) {
 			fmt.Fprintln(os.Stderr, e)
 			os.Exit(1)
 		}
-		r := s.Execute(ctx, os.Args[1])
+		r := s.Execute(ctx, os.Args[1], nil)
 		if e := s.Close(); e != nil {
 			fmt.Fprintln(os.Stderr, e)
 			os.Exit(1)
@@ -70,10 +72,14 @@ func Main(data []byte, version, name string, anime bool, f Factory) {
 			fmt.Fprintln(os.Stderr, e)
 			os.Exit(1)
 		}
-		if r.State == "prerequisite_failed" || r.State == "cancelled" || r.State == "needs_attention" || r.State == "reconcile_required" || r.State == "needs_review" {
+		if r.State == "prerequisite_failed" || r.State == "cancelled" || r.State == "needs_attention" || r.State == "needs_review" {
 			os.Exit(1)
 		}
 		return
 	}
-	sdkruntime.Serve(sdkruntime.ServeConfig{Logger: s.log, Servers: sdkruntime.CapabilityServers{Runtime: s, ScheduledTask: s, ScanSource: s, HttpRoutes: s}})
+	s.auto = true
+	sdkruntime.ServeManifestWithOptions(data, version,
+		sdkruntime.CapabilityServers{ScheduledTask: s, EventConsumer: s, HttpRoutes: s},
+		sdkruntime.WithConfigure(s.configure),
+		sdkruntime.WithConfigurationChecks(s))
 }

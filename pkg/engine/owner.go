@@ -169,7 +169,9 @@ func randomName(prefix string) (string, error) {
 func themeRoot(owner *os.Root) (*os.Root, error) {
 	info, err := owner.Lstat("theme-music")
 	if errors.Is(err, os.ErrNotExist) {
-		if err := owner.Mkdir("theme-music", 0755); err != nil {
+		// Like Jellyfin's theme plugins, leave permissions to the umask so
+		// other programs that read the media can read themes too.
+		if err := owner.Mkdir("theme-music", 0777); err != nil {
 			return nil, err
 		}
 		if err := syncDir(owner); err != nil {
@@ -249,7 +251,7 @@ func copyAndLink(ctx context.Context, theme *os.Root, filename, stagedPath, expe
 		return err
 	}
 	defer src.Close()
-	dst, err := theme.OpenFile(name, os.O_CREATE|os.O_EXCL|os.O_WRONLY|syscall.O_NOFOLLOW, 0600)
+	dst, err := theme.OpenFile(name, os.O_CREATE|os.O_EXCL|os.O_WRONLY|syscall.O_NOFOLLOW, 0666)
 	if err != nil {
 		return err
 	}

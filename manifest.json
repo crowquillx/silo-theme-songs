@@ -1,6 +1,6 @@
 {
   "plugin_id": "dev.crowquillx.theme-songs",
-  "version": "0.1.15",
+  "version": "0.2.0",
   "checksum": "__CHECKSUM__",
   "silo_api_version": "v1",
   "supported_platforms": [
@@ -15,9 +15,9 @@
   ],
   "presentation": {
     "display_name": "Theme Songs",
-    "summary": "Downloads movie and series theme audio from exact ThemerrDB matches and selected URLs.",
-    "description_markdown": "Downloads movie and series theme audio from exact ThemerrDB matches and selected URLs. Preview ownership and source choices before downloading. Existing audio is preserved. New downloads are saved as MP3. Non-MP3 sources require FFmpeg with libmp3lame; existing MP3 audio is kept without re-encoding.",
-    "setup_markdown": "Create an API key in Administration → API Keys, paste it into the plugin's settings and save. Restart Silo so the plugin's tasks appear, then run Preview Theme Songs. The Theme Songs status page lists your libraries; enter the ones to use in Selected library IDs. Media folders must be writable; Silo's Docker Compose file mounts them read-only by default. The first task that finds a YouTube source installs yt-dlp and Deno in the plugin's state directory. The README lists the optional settings.",
+    "summary": "Downloads theme songs for movies and series, with season openings and endings for anime from AnimeThemes.",
+    "description_markdown": "Downloads theme audio for movies and series from ThemerrDB, and opening and ending themes for anime series from AnimeThemes. Themes are saved as MP3 in each item's `theme-music` folder, and existing themes are never replaced. Theme Songs runs on its own once a day and after Silo scans new items.\n\nAnimeThemes was a separate plugin before version 0.2.0. Uninstall it after installing this version; Theme Songs keeps managing the themes it downloaded.",
+    "setup_markdown": "1. Create an API key in **Administration → API Keys**, paste it into **Silo API key** and save.\n2. Open **Theme Songs** in the admin menu. The first run starts shortly after, and the page lets you choose libraries.\n\nSilo writes themes into your media folders, so they must be writable. Silo's Docker Compose file mounts media read-only; remove `:ro` from the media volume and recreate the container. Restart Silo to see **Download Theme Songs** in Scheduled Tasks.",
     "homepage_url": "https://github.com/crowquillx/silo-theme-songs",
     "source_url": "https://github.com/crowquillx/silo-theme-songs",
     "support_url": "https://github.com/crowquillx/silo-theme-songs/issues",
@@ -31,112 +31,259 @@
       "type": "scheduled_task.v1",
       "id": "sync",
       "display_name": "Download Theme Songs",
-      "description": "Preview or download selected themes according to configuration."
+      "description": "Downloads movie and series themes. Theme Songs also runs on its own; add triggers here for extra runs."
     },
     {
-      "type": "scheduled_task.v1",
-      "id": "preview",
-      "display_name": "Preview Theme Songs",
-      "description": "Read catalog ownership and source choices without writing media."
-    },
-    {
-      "type": "scheduled_task.v1",
-      "id": "reconcile",
-      "display_name": "Reconcile Theme Songs",
-      "description": "Recheck owned files and request discovery after a source reset."
-    },
-    {
-      "type": "scan_source.v1",
-      "id": "themes",
-      "display_name": "Theme Songs changes",
-      "description": "Reports durable server-namespace owner directories to Autoscan."
+      "type": "event_consumer.v1",
+      "id": "library-scans",
+      "display_name": "Theme Songs after library scans",
+      "description": "Downloads themes for new items after Silo scans a library.",
+      "subscriptions": [
+        "scan_complete"
+      ]
     },
     {
       "type": "http_routes.v1",
       "id": "status",
-      "display_name": "Theme Songs status",
-      "description": "Administrator-only preview and discovery status."
+      "display_name": "Theme Songs page",
+      "description": "Administrator page with libraries, run controls and the last result."
     }
   ],
   "global_config_schema": [
     {
       "key": "settings",
       "title": "Theme Songs settings",
-      "description": "Connection, destination policy, and provider selection.",
-      "json_schema": "{\"type\":\"object\",\"properties\":{\"base_url\":{\"type\":\"string\"},\"api_key\":{\"type\":\"string\",\"minLength\":1},\"profile_id\":{\"type\":\"string\"},\"state_dir\":{\"type\":\"string\"},\"library_ids\":{\"anyOf\":[{\"type\":\"array\",\"items\":{\"type\":\"string\"}},{\"type\":\"string\"}]},\"exclude_items\":{\"anyOf\":[{\"type\":\"array\",\"items\":{\"type\":\"string\"}},{\"type\":\"string\"}]},\"anime_library_ids\":{\"anyOf\":[{\"type\":\"array\",\"items\":{\"type\":\"string\"}},{\"type\":\"string\"}]},\"preview_only\":{\"type\":\"boolean\",\"default\":true},\"manual_refresh\":{\"type\":\"boolean\",\"default\":false},\"source_generation\":{\"type\":\"string\",\"default\":\"1\"},\"ffprobe\":{\"type\":\"string\",\"default\":\"/usr/lib/jellyfin-ffmpeg/ffprobe\"},\"max_downloads\":{\"type\":\"integer\",\"minimum\":1,\"maximum\":100,\"default\":10},\"destinations\":{\"anyOf\":[{\"type\":\"object\",\"properties\":{\"allowed_roots\":{\"type\":\"array\",\"items\":{\"type\":\"string\"},\"minItems\":1},\"path_mappings\":{\"type\":\"array\",\"items\":{\"type\":\"object\",\"properties\":{\"server\":{\"type\":\"string\"},\"local\":{\"type\":\"string\"}},\"required\":[\"server\",\"local\"],\"additionalProperties\":false}},\"single_season_flat_fallback\":{\"type\":\"boolean\",\"default\":false},\"destination_overrides\":{\"type\":\"object\",\"additionalProperties\":{\"type\":\"string\"}}},\"additionalProperties\":false},{\"type\":\"string\"}]},\"provider\":{\"anyOf\":[{\"type\":\"object\"},{\"type\":\"string\"}]}},\"required\":[\"api_key\"],\"additionalProperties\":false}",
+      "description": "Only the API key is required.",
+      "json_schema": "{\"type\":\"object\",\"properties\":{\"api_key\":{\"type\":\"string\",\"minLength\":1},\"library_ids\":{\"anyOf\":[{\"type\":\"array\",\"items\":{\"type\":\"string\"}},{\"type\":\"string\"}]},\"skip_library_ids\":{\"anyOf\":[{\"type\":\"array\",\"items\":{\"type\":\"string\"}},{\"type\":\"string\"}]},\"dry_run\":{\"type\":\"boolean\",\"default\":false},\"anime_themes\":{\"type\":\"boolean\",\"default\":true},\"anime_openings\":{\"type\":\"boolean\",\"default\":true},\"anime_endings\":{\"type\":\"boolean\",\"default\":true},\"anime_spoilers\":{\"type\":\"boolean\",\"default\":false},\"anime_nsfw\":{\"type\":\"boolean\",\"default\":false},\"assisted_search\":{\"type\":\"boolean\",\"default\":false},\"anime_library_ids\":{\"anyOf\":[{\"type\":\"array\",\"items\":{\"type\":\"string\"}},{\"type\":\"string\"}]},\"exclude_items\":{\"anyOf\":[{\"type\":\"array\",\"items\":{\"type\":\"string\"}},{\"type\":\"string\"}]},\"max_downloads\":{\"type\":\"integer\",\"minimum\":0,\"maximum\":10000,\"default\":0},\"manage_tools\":{\"type\":\"boolean\",\"default\":true},\"base_url\":{\"type\":\"string\"},\"profile_id\":{\"type\":\"string\"},\"state_dir\":{\"type\":\"string\"},\"ffprobe\":{\"type\":\"string\"},\"destinations\":{\"anyOf\":[{\"type\":\"object\",\"properties\":{\"allowed_roots\":{\"type\":\"array\",\"items\":{\"type\":\"string\"},\"minItems\":1},\"path_mappings\":{\"type\":\"array\",\"items\":{\"type\":\"object\",\"properties\":{\"server\":{\"type\":\"string\"},\"local\":{\"type\":\"string\"}},\"required\":[\"server\",\"local\"],\"additionalProperties\":false}},\"single_season_flat_fallback\":{\"type\":\"boolean\",\"default\":false},\"destination_overrides\":{\"type\":\"object\",\"additionalProperties\":{\"type\":\"string\"}}},\"additionalProperties\":false},{\"type\":\"string\"}]},\"provider\":{\"anyOf\":[{\"type\":\"object\"},{\"type\":\"string\"}]},\"anime_provider\":{\"anyOf\":[{\"type\":\"object\"},{\"type\":\"string\"}]},\"preview_only\":{\"type\":\"boolean\"},\"manual_refresh\":{\"type\":\"boolean\"},\"source_generation\":{\"type\":\"string\"}},\"required\":[\"api_key\"],\"additionalProperties\":false}",
       "required": false,
       "admin_form": {
         "fields": [
           {
-            "key": "base_url",
-            "label": "Silo base URL (optional)",
-            "control": 1
-          },
-          {
             "key": "api_key",
-            "label": "Silo administrator API key",
+            "label": "Silo API key",
+            "description": "Create one in Administration → API Keys with an administrator account. Theme Songs uses it to read your libraries and to ask Silo to scan each new theme.",
             "control": 3,
-            "secret": true
+            "secret": true,
+            "required": true
           },
           {
-            "key": "profile_id",
-            "label": "Primary profile ID (optional)",
-            "control": 1
-          },
-          {
-            "key": "state_dir",
-            "label": "Persistent state directory (optional)",
-            "control": 1
+            "key": "skip_library_ids",
+            "label": "Skip these libraries",
+            "description": "Library IDs separated by commas. Theme Songs uses every other movie and series library, including ones you add later. The Theme Songs page lists your libraries with checkboxes.",
+            "control": 1,
+            "placeholder": "None"
           },
           {
             "key": "library_ids",
-            "label": "Selected library IDs (comma-separated)",
-            "control": 2
+            "label": "Only these libraries",
+            "description": "Library IDs separated by commas. Leave empty to use every movie and series library.",
+            "control": 1,
+            "placeholder": "All movie and series libraries"
           },
           {
-            "key": "exclude_items",
-            "label": "Excluded item IDs (comma-separated)",
-            "control": 2
+            "key": "dry_run",
+            "label": "Dry run",
+            "description": "List what would be downloaded on the Theme Songs page without saving any files.",
+            "control": 5,
+            "default_value": false
+          },
+          {
+            "key": "anime_themes",
+            "label": "Use AnimeThemes for anime",
+            "description": "Series that AnimeThemes knows get their openings and endings in each season folder. Other series and all movies use ThemerrDB.",
+            "control": 5,
+            "default_value": true
+          },
+          {
+            "key": "anime_openings",
+            "label": "Anime openings",
+            "control": 5,
+            "default_value": true,
+            "show_when": [
+              {
+                "field": "anime_themes",
+                "equals": [
+                  "true"
+                ]
+              }
+            ]
+          },
+          {
+            "key": "anime_endings",
+            "label": "Anime endings",
+            "control": 5,
+            "default_value": true,
+            "show_when": [
+              {
+                "field": "anime_themes",
+                "equals": [
+                  "true"
+                ]
+              }
+            ]
+          },
+          {
+            "key": "anime_spoilers",
+            "label": "Allow anime themes marked as spoilers",
+            "control": 5,
+            "default_value": false,
+            "show_when": [
+              {
+                "field": "anime_themes",
+                "equals": [
+                  "true"
+                ]
+              }
+            ]
+          },
+          {
+            "key": "anime_nsfw",
+            "label": "Allow anime themes marked as NSFW",
+            "control": 5,
+            "default_value": false,
+            "show_when": [
+              {
+                "field": "anime_themes",
+                "equals": [
+                  "true"
+                ]
+              }
+            ]
+          },
+          {
+            "key": "assisted_search",
+            "label": "Suggest YouTube matches",
+            "description": "When ThemerrDB has no theme for an item, search YouTube and list candidates on the Theme Songs page. Nothing is downloaded until you save a URL for the item.",
+            "control": 5,
+            "default_value": false
           },
           {
             "key": "anime_library_ids",
-            "label": "Anime-managed library IDs (comma-separated)",
-            "control": 2
+            "label": "AnimeThemes libraries",
+            "description": "Library IDs separated by commas. Leave empty to check every series library for anime.",
+            "control": 1,
+            "placeholder": "All series libraries"
           },
           {
-            "key": "preview_only",
-            "label": "Preview only",
-            "control": 5
-          },
-          {
-            "key": "manual_refresh",
-            "label": "Manual library scans",
-            "control": 5
-          },
-          {
-            "key": "source_generation",
-            "label": "Scan generation",
-            "control": 1
-          },
-          {
-            "key": "ffprobe",
-            "label": "ffprobe executable",
-            "control": 1
+            "key": "exclude_items",
+            "label": "Skip these items",
+            "description": "Catalog item IDs separated by commas.",
+            "control": 2,
+            "placeholder": "None"
           },
           {
             "key": "max_downloads",
             "label": "Downloads per run",
-            "control": 4
+            "description": "0 means no limit.",
+            "control": 4,
+            "default_value": 0,
+            "validation": {
+              "has_min": true,
+              "min": 0,
+              "has_max": true,
+              "max": 10000
+            }
+          },
+          {
+            "key": "manage_tools",
+            "label": "Install yt-dlp and Deno",
+            "description": "The first theme that comes from YouTube installs them in the plugin's state directory, which uses about 190 MB. Turn off to use your own from PATH.",
+            "control": 5,
+            "default_value": true
+          },
+          {
+            "key": "base_url",
+            "label": "Silo URL",
+            "description": "Needed only when the plugin cannot reach Silo at its internal address.",
+            "control": 1,
+            "placeholder": "Silo's internal address"
+          },
+          {
+            "key": "profile_id",
+            "label": "Profile ID",
+            "control": 1,
+            "placeholder": "The API key owner's primary profile"
+          },
+          {
+            "key": "state_dir",
+            "label": "Persistent state directory",
+            "description": "Needed only when Silo installs plugins outside its plugin directory.",
+            "control": 1,
+            "placeholder": "plugin-state in Silo's plugin directory"
+          },
+          {
+            "key": "ffprobe",
+            "label": "ffprobe path",
+            "control": 1,
+            "placeholder": "/usr/lib/jellyfin-ffmpeg/ffprobe, then PATH"
           },
           {
             "key": "destinations",
-            "label": "Writable roots and path mappings (JSON, optional)",
+            "label": "Writable roots and path mappings (JSON)",
+            "description": "Needed only when the plugin sees media at other paths than Silo. The README describes the format.",
             "control": 2
           },
           {
             "key": "provider",
-            "label": "Provider settings (JSON)",
+            "label": "ThemerrDB and YouTube settings (JSON)",
+            "description": "Per-item URL overrides and the other options in the README.",
             "control": 2
+          },
+          {
+            "key": "anime_provider",
+            "label": "AnimeThemes settings (JSON)",
+            "description": "Manual mappings, selection overrides and the other options in the README.",
+            "control": 2
+          }
+        ],
+        "sections": [
+          {
+            "key": "connection",
+            "title": "Connection",
+            "field_keys": [
+              "api_key"
+            ]
+          },
+          {
+            "key": "libraries",
+            "title": "Libraries",
+            "field_keys": [
+              "skip_library_ids",
+              "library_ids"
+            ]
+          },
+          {
+            "key": "downloads",
+            "title": "Downloads",
+            "field_keys": [
+              "dry_run",
+              "anime_themes",
+              "anime_openings",
+              "anime_endings",
+              "anime_spoilers",
+              "anime_nsfw",
+              "assisted_search"
+            ]
+          },
+          {
+            "key": "advanced",
+            "title": "Advanced",
+            "description": "Leave these empty unless your setup differs from Silo's Docker image.",
+            "collapsible": true,
+            "collapsed_default": true,
+            "field_keys": [
+              "anime_library_ids",
+              "exclude_items",
+              "max_downloads",
+              "manage_tools",
+              "base_url",
+              "profile_id",
+              "state_dir",
+              "ffprobe",
+              "destinations",
+              "provider",
+              "anime_provider"
+            ]
           }
         ]
       }
@@ -157,6 +304,21 @@
       "method": "GET",
       "path": "/status",
       "access": "admin"
+    },
+    {
+      "id": "run",
+      "method": "POST",
+      "path": "/run",
+      "access": "admin"
+    },
+    {
+      "id": "libraries",
+      "method": "POST",
+      "path": "/libraries",
+      "access": "admin"
     }
-  ]
+  ],
+  "metadata": {
+    "configuration_check": true
+  }
 }

@@ -1,8 +1,11 @@
-// Package pluginapp is the shared scheduled-task and scan-source runtime.
+// Package pluginapp is the Theme Songs runtime: scheduled and automatic runs,
+// the status page and the settings check.
 package pluginapp
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -20,22 +23,44 @@ import (
 )
 
 type Config struct {
-	BaseURL          string              `json:"base_url"`
-	APIKey           string              `json:"api_key"`
-	ProfileID        string              `json:"profile_id"`
-	StateDir         string              `json:"state_dir"`
-	LibraryIDs       []string            `json:"library_ids"`
-	ExcludeItems     []string            `json:"exclude_items"`
-	AnimeLibraryIDs  []string            `json:"anime_library_ids"`
-	PreviewOnly      bool                `json:"preview_only"`
-	ManualRefresh    bool                `json:"manual_refresh"`
-	SourceGeneration string              `json:"source_generation"`
-	FFprobe          string              `json:"ffprobe"`
-	MaxDownloads     int                 `json:"max_downloads"`
-	Policy           destinations.Policy `json:"destinations"`
-	Provider         json.RawMessage     `json:"provider"`
+	BaseURL   string `json:"base_url"`
+	APIKey    string `json:"api_key"`
+	ProfileID string `json:"profile_id"`
+	StateDir  string `json:"state_dir"`
+	// LibraryIDs limits runs to these libraries; empty means every movie and
+	// series library. SkipLibraryIDs removes libraries from either set.
+	LibraryIDs     []string `json:"library_ids"`
+	SkipLibraryIDs []string `json:"skip_library_ids"`
+	ExcludeItems   []string `json:"exclude_items"`
+	// AnimeLibraryIDs limits AnimeThemes to these libraries; empty means it
+	// checks every series.
+	AnimeLibraryIDs []string            `json:"anime_library_ids"`
+	DryRun          *bool               `json:"dry_run"`
+	AnimeThemes     *bool               `json:"anime_themes"`
+	FFprobe         string              `json:"ffprobe"`
+	MaxDownloads    int                 `json:"max_downloads"`
+	Policy          destinations.Policy `json:"destinations"`
+	// Provider holds the ThemerrDB and YouTube settings, AnimeProvider the
+	// AnimeThemes settings. The switches below override the matching keys.
+	Provider      json.RawMessage `json:"provider"`
+	AnimeProvider json.RawMessage `json:"anime_provider"`
 
-	siloURL string // BaseURL, or the host's internal API URL when BaseURL is empty
+	ManageTools    *bool `json:"manage_tools"`
+	AssistedSearch *bool `json:"assisted_search"`
+	AnimeOpenings  *bool `json:"anime_openings"`
+	AnimeEndings   *bool `json:"anime_endings"`
+	AnimeSpoilers  *bool `json:"anime_spoilers"`
+	AnimeNSFW      *bool `json:"anime_nsfw"`
+
+	// Settings from versions before 0.2.0. Silo keeps saved settings that
+	// the form no longer shows, so they still arrive. PreviewOnly applies
+	// until dry_run is saved; the others are ignored.
+	PreviewOnly      *bool  `json:"preview_only"`
+	ManualRefresh    *bool  `json:"manual_refresh"`
+	SourceGeneration string `json:"source_generation"`
+
+	siloURL  string // BaseURL, or the host's internal API URL when BaseURL is empty
+	cacheDir string // Silo's plugin cache directory, when known
 
 	// Log is the plugin's logger, set by the runtime before Factory runs.
 	Log hclog.Logger `json:"-"`
@@ -44,13 +69,18 @@ type Config struct {
 // Silo's settings form saves each textarea as text, so these settings arrive
 // as strings. Lists also accept IDs separated by commas or spaces.
 var (
-	formTextLists   = []string{"library_ids", "exclude_items", "anime_library_ids"}
-	formTextObjects = []string{"destinations", "provider"}
+	formTextLists   = []string{"library_ids", "skip_library_ids", "exclude_items", "anime_library_ids"}
+	formTextObjects = []string{"destinations", "provider", "anime_provider"}
 )
 
 // decodeFormText replaces the text of list and object settings with their
-// values. An empty text leaves the setting unset.
+// values. An empty text, or a cleared number, leaves the setting unset.
 func decodeFormText(settings map[string]any) error {
+	for key, value := range settings {
+		if value == nil {
+			delete(settings, key)
+		}
+	}
 	for _, key := range append(slices.Clone(formTextLists), formTextObjects...) {
 		text, ok := settings[key].(string)
 		if !ok {
@@ -84,7 +114,45 @@ func decodeFormText(settings map[string]any) error {
 const fallbackSiloURL = "http://127.0.0.1:8080"
 
 func Defaults() Config {
-	return Config{PreviewOnly: true, SourceGeneration: "1", MaxDownloads: 10, FFprobe: provider.BundledTool("ffprobe")}
+	return Config{FFprobe: provider.BundledTool("ffprobe")}
+}
+
+func on(v *bool, fallback bool) bool {
+	if v == nil {
+		return fallback
+	}
+	return *v
+}
+
+// dryRun reports whether runs only list what they would download.
+func (c Config) dryRun() bool {
+	if c.DryRun != nil {
+		return *c.DryRun
+	}
+	return on(c.PreviewOnly, false)
+}
+
+func (c Config) animeEnabled() bool { return on(c.AnimeThemes, true) }
+
+// selected reports whether runs include a library.
+func (c Config) selected(l siloapi.Library) bool {
+	if !siloapi.Eligible(l) || slices.Contains(c.SkipLibraryIDs, l.ID) {
+		return false
+	}
+	return len(c.LibraryIDs) == 0 || slices.Contains(c.LibraryIDs, l.ID)
+}
+
+// animeLibrary reports whether AnimeThemes may handle series in a library.
+func (c Config) animeLibrary(id string) bool {
+	return len(c.AnimeLibraryIDs) == 0 || slices.Contains(c.AnimeLibraryIDs, id)
+}
+
+// fingerprint identifies the settings a full run used, without the API key.
+func (c Config) fingerprint() string {
+	c.APIKey = ""
+	data, _ := json.Marshal(c)
+	h := sha256.Sum256(data)
+	return hex.EncodeToString(h[:])
 }
 
 // withDefaults fills settings Silo can supply. An empty state_dir uses
@@ -100,8 +168,12 @@ func (c Config) withDefaults(ctx context.Context, pluginID string) Config {
 			}
 		}
 	}
-	if cache := pluginCacheDir(pluginID); c.StateDir == "" && filepath.IsAbs(cache) && pluginID != "" {
-		c.StateDir = filepath.Join(filepath.Clean(cache), "plugin-state", pluginID)
+	c.cacheDir = pluginCacheDir(pluginID)
+	if !filepath.IsAbs(c.cacheDir) {
+		c.cacheDir = ""
+	}
+	if c.StateDir == "" && c.cacheDir != "" && pluginID != "" {
+		c.StateDir = filepath.Join(filepath.Clean(c.cacheDir), "plugin-state", pluginID)
 	}
 	return c
 }
@@ -139,7 +211,7 @@ func (c Config) policy(libs []siloapi.Library) destinations.Policy {
 		return p
 	}
 	for _, l := range libs {
-		if !slices.Contains(c.LibraryIDs, l.ID) {
+		if !c.selected(l) {
 			continue
 		}
 		for _, server := range l.Paths {
@@ -159,7 +231,13 @@ func (c Config) policy(libs []siloapi.Library) destinations.Policy {
 	return p
 }
 
+// errNoAPIKey is the first problem of a fresh installation.
+var errNoAPIKey = errors.New("Create an API key in Administration → API Keys, paste it into Silo API key in this plugin's settings and save.")
+
 func (c Config) Validate() error {
+	if strings.TrimSpace(c.APIKey) == "" {
+		return errNoAPIKey
+	}
 	url := c.siloURL
 	if url == "" {
 		url = c.BaseURL
@@ -171,19 +249,16 @@ func (c Config) Validate() error {
 		return e
 	}
 	if c.StateDir == "" {
-		return errors.New("set state_dir to a persistent directory")
+		return errors.New("Silo did not install the plugin in its plugin directory; set Persistent state directory in Advanced settings")
 	}
 	if !filepath.IsAbs(c.StateDir) || filepath.Clean(c.StateDir) != c.StateDir || c.StateDir == "/" {
-		return errors.New("persistent state_dir must be a normalized absolute directory")
+		return errors.New("Persistent state directory must be a normalized absolute directory")
 	}
-	if len(c.LibraryIDs) > 100 {
-		return errors.New("at most 100 selected libraries")
+	if len(c.LibraryIDs) > 100 || len(c.SkipLibraryIDs) > 100 || len(c.AnimeLibraryIDs) > 100 {
+		return errors.New("library lists are limited to 100 libraries")
 	}
-	if c.SourceGeneration == "" || len(c.SourceGeneration) > 128 {
-		return errors.New("source_generation is required and limited to 128 characters")
-	}
-	if c.MaxDownloads < 1 || c.MaxDownloads > 100 {
-		return errors.New("max_downloads must be between 1 and 100")
+	if c.MaxDownloads < 0 || c.MaxDownloads > 10000 {
+		return errors.New("Downloads per run must be between 0 (no limit) and 10000")
 	}
 	if c.FFprobe == "" {
 		return errors.New("ffprobe executable is required")
@@ -208,4 +283,11 @@ type Provider interface {
 	Select(context.Context, Target) ([]Candidate, error)
 	Fetch(context.Context, Candidate) (*provider.StagedAudio, error)
 }
+
+// Claimer is implemented by the AnimeThemes provider. Claims reports whether
+// it maps any of a series' seasons, given one target per season.
+type Claimer interface {
+	Claims(context.Context, []Target) (bool, error)
+}
+
 type Factory func(Config) (Provider, error)

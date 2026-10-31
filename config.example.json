@@ -1,9 +1,5 @@
 {
   "api_key": "REPLACE_WITH_ADMIN_API_KEY",
-  "library_ids": [
-    "3",
-    "4"
-  ],
-  "preview_only": true,
-  "manual_refresh": true
+  "state_dir": "/var/lib/theme-songs",
+  "dry_run": true
 }

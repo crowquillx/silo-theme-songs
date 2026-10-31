@@ -8,26 +8,23 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"html/template"
+	"maps"
 	"math"
+	"os"
 	"path/filepath"
 	"regexp"
 	"slices"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	pluginv1 "github.com/Silo-Server/silo-plugin-sdk/pkg/pluginproto/silo/plugin/v1"
-	sdkruntime "github.com/Silo-Server/silo-plugin-sdk/pkg/pluginsdk/runtime"
-	"github.com/Silo-Server/silo-plugin-sdk/pkg/pluginsdk/runtimedefault"
-	"github.com/Silo-Server/silo-plugin-sdk/pkg/pluginsdk/runtimehost"
 	"github.com/crowquillx/silo-theme-songs/pkg/destinations"
 	"github.com/crowquillx/silo-theme-songs/pkg/engine"
 	"github.com/crowquillx/silo-theme-songs/pkg/provider"
 	"github.com/crowquillx/silo-theme-songs/pkg/siloapi"
 	"github.com/hashicorp/go-hclog"
-	"google.golang.org/grpc/codes"
-	"google.golang.org/grpc/status"
 	"google.golang.org/protobuf/types/known/structpb"
 )
 
@@ -43,22 +40,19 @@ type Row struct {
 	Candidates  []provider.ReviewCandidate `json:"candidates,omitempty"`
 }
 type Report struct {
-	State          string    `json:"state"`
-	Mode           string    `json:"mode"`
-	At             time.Time `json:"at"`
-	Rows           []Row     `json:"rows"`
-	Errors         []string  `json:"errors,omitempty"`
-	Downloaded     int       `json:"downloaded"`
-	CatalogAdapter string    `json:"catalog_adapter"`
-	Truncated      bool      `json:"truncated,omitempty"`
-	RepairCount    int       `json:"repair_count,omitempty"`
-	RepairPaths    []string  `json:"repair_paths,omitempty"`
-	Message        string    `json:"message,omitempty"`
+	State string    `json:"state"`
+	Mode  string    `json:"mode"`
+	At    time.Time `json:"at"`
+	// NewItems marks a run limited to items added since the last run.
+	NewItems   bool     `json:"new_items,omitempty"`
+	Rows       []Row    `json:"rows"`
+	Errors     []string `json:"errors,omitempty"`
+	Notices    []string `json:"notices,omitempty"`
+	Downloaded int      `json:"downloaded"`
+	Truncated  bool     `json:"truncated,omitempty"`
+	Message    string   `json:"message,omitempty"`
 	// Summary counts every row, including rows past the display limit.
 	Summary []SummaryRow `json:"summary,omitempty"`
-	// Progress describes a task that is still running; the rest of the
-	// report is the last finished run.
-	Progress string `json:"progress,omitempty"`
 }
 
 type SummaryRow struct {
@@ -71,6 +65,8 @@ const (
 	displayRows  = 1000
 	summaryLimit = 30
 	maxRows      = 200000
+	// maxScanRequests bounds how often the plugin asks Silo to scan one theme.
+	maxScanRequests = 10
 )
 
 func (r *Report) add(row Row) {
@@ -81,11 +77,17 @@ func (r *Report) add(row Row) {
 	r.Rows = append(r.Rows, row)
 }
 
+func (r *Report) notice(text string) {
+	if !slices.Contains(r.Notices, text) {
+		r.Notices = append(r.Notices, text)
+	}
+}
+
 // actionPriority orders rows so problems and planned work stay visible
 // when the report is cut to its display limit.
 func actionPriority(action string) int {
 	switch action {
-	case "download_failed", "prerequisite_failed", "needs_review", "selection_changed", "operator_review", "stale", "protected", "destination_unconfirmed", "reconcile_required", "pending":
+	case "download_failed", "prerequisite_failed", "needs_review", "selection_changed", "operator_review", "stale", "protected", "destination_unconfirmed", "pending":
 		return 0
 	case "downloaded", "would_download", "deferred":
 		return 1
@@ -124,28 +126,54 @@ func (r *Report) finish() {
 	}
 }
 
+// Provider names identify each source's engine, owner markers and file
+// names. They match the names the separate plugins used before 0.2.0.
+const (
+	generalName = "general"
+	animeName   = "animethemes"
+)
+
+// source is one theme provider with its own state.
+type source struct {
+	name     string
+	anime    bool
+	provider Provider
+	engine   *engine.Engine
+}
+
 type Server struct {
-	runtimedefault.Server
 	pluginv1.UnimplementedScheduledTaskServer
-	pluginv1.UnimplementedScanSourceServer
 	pluginv1.UnimplementedHttpRoutesServer
-	mu          sync.RWMutex
-	work        sync.Mutex
-	manifest    *pluginv1.PluginManifest
-	name        string
-	anime       bool
-	factory     Factory
-	cfg         Config
-	client      *siloapi.Client
-	provider    Provider
-	engine      *engine.Engine
-	report      Report
-	repairCount int
-	repairPaths []string
-	log         hclog.Logger
-	jobs        map[string]*job // background task runs by mode, guarded by mu
-	jobCtx      context.Context
-	cancelJobs  context.CancelFunc
+	pluginv1.UnimplementedEventConsumerServer
+	pluginv1.UnimplementedConfigurationChecksServer
+	mu           sync.RWMutex
+	work         sync.Mutex
+	manifest     *pluginv1.PluginManifest
+	factory      Factory
+	animeFactory Factory
+	cfg          Config
+	raw          map[string]any // settings as Silo stored them
+	configErr    error
+	client       *siloapi.Client
+	general      *source
+	anime        *source
+	report       Report // the last full or requested run
+	newReport    Report // the last run for new items
+	progress     string
+	log          hclog.Logger
+	jobs         map[string]*job // background task runs by mode, guarded by mu
+	jobCtx       context.Context
+	cancelJobs   context.CancelFunc
+
+	// legacyAnime reports whether the separate AnimeThemes plugin runs.
+	legacyAnime func(context.Context) bool
+	// auto turns on automatic runs; the CLI leaves it off.
+	auto         bool
+	startDelay   time.Duration
+	scanDelay    time.Duration
+	confirmWaits []time.Duration
+	scanned      map[string]bool
+	scanTimer    *time.Timer
 }
 
 type job struct {
@@ -154,8 +182,23 @@ type job struct {
 	report Report
 }
 
-func New(m *pluginv1.PluginManifest, name string, anime bool, f Factory) *Server {
-	s := &Server{manifest: m, name: name, anime: anime, factory: f, report: Report{State: "not_configured", Rows: []Row{}}, jobs: map[string]*job{}, log: hclog.NewNullLogger()}
+// New returns a server for the general provider factory and, when anime is
+// not nil, the AnimeThemes provider factory.
+func New(m *pluginv1.PluginManifest, general, anime Factory) *Server {
+	s := &Server{
+		manifest:     m,
+		factory:      general,
+		animeFactory: anime,
+		configErr:    errNoAPIKey,
+		report:       Report{State: "not_configured", Rows: []Row{}},
+		jobs:         map[string]*job{},
+		log:          hclog.NewNullLogger(),
+		startDelay:   20 * time.Second,
+		scanDelay:    time.Minute,
+		confirmWaits: []time.Duration{time.Second, 2 * time.Second, 4 * time.Second},
+		scanned:      map[string]bool{},
+		legacyAnime:  legacyAnimeEnabled,
+	}
 	s.jobCtx, s.cancelJobs = context.WithCancel(context.Background())
 	return s
 }
@@ -167,127 +210,240 @@ func (s *Server) stopJobs() {
 	defer s.mu.Unlock()
 	s.cancelJobs()
 	s.jobCtx, s.cancelJobs = context.WithCancel(context.Background())
+	if s.scanTimer != nil {
+		s.scanTimer.Stop()
+		s.scanTimer = nil
+	}
 }
-func (s *Server) GetManifest(context.Context, *pluginv1.GetManifestRequest) (*pluginv1.GetManifestResponse, error) {
-	return &pluginv1.GetManifestResponse{Manifest: s.manifest}, nil
-}
-func (s *Server) Configure(ctx context.Context, req *pluginv1.ConfigureRequest) (*pluginv1.ConfigureResponse, error) {
-	var raw []byte
-	for _, entry := range req.GetConfig() {
+
+// configure receives Silo's saved settings. Silo calls it when the plugin
+// starts and restarts the plugin after the settings are saved. Settings the
+// plugin cannot use leave it unconfigured with the problem on its status
+// page, so the page and the settings check keep working.
+func (s *Server) configure(ctx context.Context, entries []*pluginv1.ConfigEntry) error {
+	var raw map[string]any
+	for _, entry := range entries {
 		if entry.GetKey() == "settings" {
-			settings := entry.GetValue().AsMap()
-			if e := decodeFormText(settings); e != nil {
-				return nil, e
-			}
-			var err error
-			raw, err = json.Marshal(settings)
-			if err != nil {
-				return nil, errors.New("invalid plugin settings")
-			}
+			raw = entry.GetValue().AsMap()
 		}
 	}
-	if len(raw) == 0 || string(raw) == "{}" {
-		return &pluginv1.ConfigureResponse{}, s.resetLocal()
+	// ConfigureLocal logs and records its own problems.
+	if cfg, err := parseSettings(raw); err == nil {
+		_ = s.ConfigureLocal(ctx, cfg)
+	} else {
+		s.log.Warn("settings incomplete", "problem", err)
+		_ = s.unconfigure(err)
 	}
+	s.mu.Lock()
+	s.raw = raw
+	s.mu.Unlock()
+	return nil
+}
+
+// parseSettings decodes the settings entry Silo stores.
+func parseSettings(raw map[string]any) (Config, error) {
 	cfg := Defaults()
-	d := json.NewDecoder(bytes.NewReader(raw))
+	if len(raw) == 0 {
+		return cfg, errNoAPIKey
+	}
+	settings := maps.Clone(raw)
+	if e := decodeFormText(settings); e != nil {
+		return cfg, e
+	}
+	data, err := json.Marshal(settings)
+	if err != nil {
+		return cfg, errors.New("invalid plugin settings")
+	}
+	d := json.NewDecoder(bytes.NewReader(data))
 	d.DisallowUnknownFields()
 	if e := d.Decode(&cfg); e != nil {
-		return nil, errors.New("invalid plugin settings")
+		return cfg, fmt.Errorf("invalid plugin settings: %v", e)
 	}
-	if e := s.ConfigureLocal(ctx, cfg); e != nil {
-		return nil, e
-	}
-	return &pluginv1.ConfigureResponse{}, nil
+	return cfg, nil
 }
-func (s *Server) resetLocal() error {
+
+// unconfigure closes the sources and records why the plugin cannot run.
+func (s *Server) unconfigure(problem error) error {
 	s.stopJobs()
 	s.work.Lock()
 	defer s.work.Unlock()
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	var err error
-	if s.engine != nil {
-		err = s.engine.Close()
-	}
-	s.engine = nil
+	err := s.closeSources()
 	s.client = nil
-	s.provider = nil
 	s.cfg = Config{}
+	s.configErr = problem
 	s.report = Report{State: "not_configured", Rows: []Row{}}
-	s.repairCount = 0
-	s.repairPaths = nil
+	s.newReport = Report{}
 	return err
 }
+
+func (s *Server) closeSources() error {
+	var errs []error
+	for _, src := range []*source{s.general, s.anime} {
+		if src != nil && src.engine != nil {
+			errs = append(errs, src.engine.Close())
+		}
+	}
+	s.general, s.anime = nil, nil
+	return errors.Join(errs...)
+}
+
+// ConfigureLocal applies decoded settings. It returns the problem when the
+// settings cannot be used, which also leaves the plugin unconfigured.
 func (s *Server) ConfigureLocal(ctx context.Context, cfg Config) error {
 	cfg = cfg.withDefaults(ctx, s.manifest.GetPluginId())
 	cfg.Log = s.log
-	if e := cfg.Validate(); e != nil {
+	fail := func(e error) error {
 		s.log.Warn("configuration rejected", "error", e)
+		_ = s.unconfigure(e)
 		return e
+	}
+	if e := cfg.Validate(); e != nil {
+		return fail(e)
 	}
 	client, e := siloapi.New(cfg.siloURL, cfg.APIKey, cfg.ProfileID)
 	if e != nil {
-		return e
+		return fail(e)
 	}
 	s.stopJobs()
 	s.work.Lock()
-	defer s.work.Unlock()
 	s.mu.Lock()
-	defer s.mu.Unlock()
-	if s.engine != nil && s.cfg.StateDir != cfg.StateDir {
+	if s.general != nil && s.cfg.StateDir != cfg.StateDir {
+		s.mu.Unlock()
+		s.work.Unlock()
 		return errors.New("restart the plugin before changing state_dir")
 	}
-	store := s.engine
-	if store == nil {
-		store, e = engine.Open(cfg.StateDir, s.name)
+	general := s.general
+	if general == nil {
+		store, e := engine.Open(cfg.StateDir, generalName)
 		if e != nil {
-			return e
+			s.mu.Unlock()
+			s.work.Unlock()
+			return fail(e)
 		}
+		general = &source{name: generalName, engine: store}
 	}
-	provider, e := s.factory(cfg)
+	p, e := s.factory(cfg)
 	if e != nil {
-		if s.engine == nil {
-			store.Close()
+		if s.general == nil {
+			general.engine.Close()
 		}
-		return e
+		s.mu.Unlock()
+		s.work.Unlock()
+		return fail(e)
+	}
+	general.provider = p
+	// AnimeThemes opens on the next run with the new settings.
+	if s.anime != nil {
+		s.anime.provider = nil
 	}
 	s.cfg = cfg
 	s.client = client
-	s.provider = provider
-	s.engine = store
-	s.report = Report{State: "configured", Rows: []Row{}, RepairCount: s.repairCount, RepairPaths: append([]string(nil), s.repairPaths...)}
-	s.log.Info("configured", "silo_url", cfg.siloURL, "libraries", cfg.LibraryIDs, "state_dir", cfg.StateDir, "preview_only", cfg.PreviewOnly, "manual_scans", cfg.ManualRefresh, "primary_profile", cfg.ProfileID == "")
-	if s.repairCount > 0 {
-		s.report.State = "needs_attention"
+	s.general = general
+	s.configErr = nil
+	if s.report.State == "not_configured" {
+		s.report = Report{State: "configured", Rows: []Row{}}
+	}
+	jobs := s.jobCtx
+	s.mu.Unlock()
+	s.work.Unlock()
+	s.log.Info("configured", "silo_url", cfg.siloURL, "libraries", cfg.LibraryIDs, "skipped_libraries", cfg.SkipLibraryIDs, "state_dir", cfg.StateDir, "dry_run", cfg.dryRun(), "anime_themes", cfg.animeEnabled(), "primary_profile", cfg.ProfileID == "")
+	if s.auto {
+		go s.automate(jobs, cfg)
 	}
 	return nil
 }
+
 func (s *Server) Close() error {
 	s.stopJobs()
 	s.work.Lock()
 	defer s.work.Unlock()
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if s.engine != nil {
-		return s.engine.Close()
-	}
-	return nil
+	return s.closeSources()
 }
+
+// animeSource returns AnimeThemes for a run, opening it on first use, or nil
+// when it is turned off or the separate AnimeThemes plugin still runs. The
+// caller holds s.work.
+func (s *Server) animeSource(ctx context.Context, cfg Config, report *Report) (*source, bool) {
+	if !cfg.animeEnabled() || s.animeFactory == nil {
+		return nil, false
+	}
+	dir := filepath.Join(cfg.StateDir, "anime")
+	s.mu.RLock()
+	src := s.anime
+	s.mu.RUnlock()
+	if s.legacyAnime(ctx) {
+		report.notice("AnimeThemes is now part of Theme Songs. Uninstall the separate AnimeThemes plugin so Theme Songs can manage anime themes; until then, anime libraries are left to it.")
+		// Open existing AnimeThemes state so the run can leave the series
+		// it manages alone.
+		if src == nil {
+			if _, err := os.Lstat(filepath.Join(dir, "state.json")); err == nil {
+				if store, err := engine.Open(dir, animeName); err == nil {
+					s.mu.Lock()
+					s.anime = &source{name: animeName, anime: true, engine: store}
+					s.mu.Unlock()
+				}
+			}
+		}
+		return nil, true
+	}
+	if src != nil && src.provider != nil {
+		return src, false
+	}
+	if src == nil {
+		if copied, err := migrateLegacyAnime(cfg.cacheDir, dir); err != nil {
+			report.Errors = append(report.Errors, "AnimeThemes: "+err.Error())
+			return nil, false
+		} else if copied {
+			s.log.Info("copied the AnimeThemes plugin's state", "state_dir", dir)
+		}
+		store, err := engine.Open(dir, animeName)
+		if err != nil {
+			report.Errors = append(report.Errors, "AnimeThemes: "+err.Error())
+			return nil, false
+		}
+		src = &source{name: animeName, anime: true, engine: store}
+	}
+	animeCfg := cfg
+	animeCfg.StateDir = dir
+	p, err := s.animeFactory(animeCfg)
+	if err != nil {
+		report.Errors = append(report.Errors, "AnimeThemes: "+err.Error())
+		if s.anime == nil {
+			src.engine.Close()
+		}
+		return nil, false
+	}
+	src.provider = p
+	s.mu.Lock()
+	s.anime = src
+	s.mu.Unlock()
+	return src, false
+}
+
 func taskMode(key string) string {
 	for _, v := range []string{"preview", "reconcile", "sync"} {
 		if key == v || strings.HasSuffix(key, ":"+v) || strings.HasSuffix(key, "_"+v) || strings.HasSuffix(key, "/"+v) {
+			// Reconcile was a separate task before 0.2.0; every run now
+			// rechecks published themes.
+			if v == "reconcile" {
+				return "sync"
+			}
 			return v
 		}
 	}
 	return ""
 }
+
 func (s *Server) Run(ctx context.Context, req *pluginv1.RunScheduledTaskRequest) (*pluginv1.RunScheduledTaskResponse, error) {
 	mode := taskMode(req.GetTaskKey())
 	if mode == "" {
 		return nil, errors.New("unknown theme task")
 	}
-	j := s.start(mode)
+	j := s.start(mode, nil)
 	// Answer shortly before the RPC deadline; the run itself continues.
 	var budget <-chan time.Time
 	if deadline, ok := ctx.Deadline(); ok {
@@ -321,17 +477,20 @@ func (s *Server) Run(ctx context.Context, req *pluginv1.RunScheduledTaskRequest)
 	return &pluginv1.RunScheduledTaskResponse{Output: out}, e
 }
 
-// start runs a task detached from the Run RPC. Silo gives each Run call a
-// 10-second control deadline, far shorter than a library inventory or download.
-// A run already in progress for the same mode is reused.
-func (s *Server) start(mode string) *job {
+// start runs a task detached from the caller. Silo gives each Run call a
+// 10-second control deadline, far shorter than a library read or download.
+// A run already in progress for the same work is reused. only limits a run
+// to listed items per library; nil reads every selected library.
+func (s *Server) start(mode string, only map[string][]string) *job {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	// With preview only on, Download does what Preview does. Silo starts
-	// every plugin task at startup, so both share one run.
+	// With dry run on, Download does what Preview does, so both share a run.
 	key := mode
-	if mode == "sync" && s.cfg.PreviewOnly {
+	if mode == "sync" && s.cfg.dryRun() {
 		key = "preview"
+	}
+	if only != nil {
+		key += ":new"
 	}
 	if j := s.jobs[key]; j != nil {
 		s.log.Info("task joined a run already in progress", "task", mode)
@@ -342,7 +501,7 @@ func (s *Server) start(mode string) *job {
 	s.jobs[key] = j
 	go func() {
 		defer cancel()
-		j.report = s.Execute(ctx, mode)
+		j.report = s.Execute(ctx, mode, only)
 		s.forget(j)
 		close(j.done)
 	}()
@@ -352,7 +511,7 @@ func (s *Server) start(mode string) *job {
 // setProgress updates the status of the running task.
 func (s *Server) setProgress(format string, args ...any) {
 	s.mu.Lock()
-	s.report.Progress = fmt.Sprintf(format, args...)
+	s.progress = fmt.Sprintf(format, args...)
 	s.mu.Unlock()
 }
 
@@ -366,42 +525,59 @@ func (s *Server) forget(j *job) {
 	}
 }
 
-func generation(c Config, source siloapi.ScanSource) string {
-	h := sha256.Sum256([]byte(c.BaseURL + "\x00" + source.ID + "\x00" + c.SourceGeneration))
-	return hex.EncodeToString(h[:])
+// run is the state of one Execute call.
+type run struct {
+	ctx     context.Context
+	mode    string
+	preview bool
+	cfg     Config
+	api     *siloapi.Client
+	report  *Report
+	// misses counts inline discovery checks that ran out of time in a row.
+	misses int
+	// scanUnavailable stops scan requests to a Silo without the API.
+	scanUnavailable bool
+	// deferred holds AnimeThemes' state while the separate AnimeThemes
+	// plugin runs, so the series it already manages are left alone.
+	deferred *source
 }
 
-func (s *Server) Execute(ctx context.Context, mode string) (report Report) {
+// Execute runs a task. mode is "sync" or "preview"; only limits the run to
+// listed items per library.
+func (s *Server) Execute(ctx context.Context, mode string, only map[string][]string) (report Report) {
 	s.work.Lock()
 	defer s.work.Unlock()
-	report = Report{State: "complete", Mode: mode, At: time.Now().UTC(), Rows: []Row{}, CatalogAdapter: "native_v2"}
+	report = Report{State: "complete", Mode: mode, At: time.Now().UTC(), NewItems: only != nil, Rows: []Row{}}
 	s.setProgress("%s: starting", taskName(mode))
-	s.log.Info("task started", "task", mode)
+	s.log.Info("task started", "task", mode, "new_items", only != nil)
 	defer func() {
 		report.finish()
 		s.logResult(report)
 		s.mu.Lock()
-		report.RepairCount = s.repairCount
-		report.RepairPaths = append([]string(nil), s.repairPaths...)
-		if report.RepairCount > 0 && report.State != "prerequisite_failed" && report.State != "cancelled" {
-			report.State = "needs_attention"
+		if only != nil {
+			s.newReport = report
+		} else {
+			s.report = report
 		}
-		s.report = report
+		s.progress = ""
 		s.mu.Unlock()
 	}()
 	s.mu.RLock()
-	c, api, p, store := s.cfg, s.client, s.provider, s.engine
+	cfg, api, general, configErr := s.cfg, s.client, s.general, s.configErr
 	s.mu.RUnlock()
-	if store == nil {
+	if general == nil {
 		report.State = "not_configured"
-		report.Errors = []string{"Configure the Silo connection, libraries, writable roots and persistent state."}
+		if configErr == nil {
+			configErr = errNoAPIKey
+		}
+		report.Errors = []string{configErr.Error()}
 		return
 	}
-	preview := mode == "preview" || mode == "reconcile" || c.PreviewOnly
+	r := &run{ctx: ctx, mode: mode, preview: mode == "preview" || cfg.dryRun(), api: api, report: &report}
 	if e := api.ThemeCapability(ctx); e != nil {
 		report.State = "prerequisite_failed"
 		report.Errors = append(report.Errors, e.Error())
-		preview = true
+		r.preview = true
 	}
 	libs, e := api.Libraries(ctx)
 	if e != nil {
@@ -409,173 +585,95 @@ func (s *Server) Execute(ctx context.Context, mode string) (report Report) {
 		report.Errors = append(report.Errors, e.Error())
 		return
 	}
-	c.Policy = c.policy(libs)
-	if len(c.LibraryIDs) == 0 {
-		report.State = "prerequisite_failed"
-		var choices []string
-		for _, l := range libs {
-			if siloapi.Eligible(l) {
-				choices = append(choices, fmt.Sprintf("%q (%s, %s)", l.ID, l.Name, l.Type))
-			}
+	settings := cfg // as configured, for the run schedule
+	cfg.Policy = cfg.policy(libs)
+	r.cfg = cfg
+	var selected []siloapi.Library
+	for _, lib := range libs {
+		if cfg.selected(lib) {
+			selected = append(selected, lib)
 		}
-		report.Errors = append(report.Errors, "Enter the libraries to use in Selected library IDs, for example 1, 3. Movie and series libraries: "+strings.Join(choices, ", ")+".")
+	}
+	for _, id := range cfg.LibraryIDs {
+		if !slices.ContainsFunc(libs, func(l siloapi.Library) bool { return l.ID == id }) {
+			report.Errors = append(report.Errors, "selected library is unavailable: "+id)
+			report.State = "prerequisite_failed"
+		}
+	}
+	if len(selected) == 0 {
+		report.State = "prerequisite_failed"
+		report.Errors = append(report.Errors, "No movie or series libraries are selected. Choose libraries on the Theme Songs page or in the plugin's settings.")
 		return
 	}
-	if host := sdkruntime.Host(); host != nil {
-		hostLibs, e := host.ListLibraries(ctx, "")
-		if e != nil {
-			report.State = "prerequisite_failed"
-			report.Errors = append(report.Errors, "RuntimeHost.ListLibraries failed")
-			return
-		}
-		for _, id := range c.LibraryIDs {
-			if !slices.ContainsFunc(hostLibs, func(l *pluginv1.Library) bool { return l.GetId() == id }) {
-				report.State = "prerequisite_failed"
-				report.Errors = append(report.Errors, "selected library is not visible through RuntimeHost")
-				return
-			}
-		}
-		_, e = host.ListLibraryMedia(ctx, runtimehost.ListLibraryMediaRequest{LibraryIDs: c.LibraryIDs, MediaTypes: []string{"series", "movie"}, PageSize: 1})
-		if e != nil && status.Code(e) != codes.Unimplemented {
-			report.State = "prerequisite_failed"
-			report.Errors = append(report.Errors, "RuntimeHost.ListLibraryMedia failed")
-			return
-		}
-		// V2 always supplies paths and authoritative season memberships; the
-		// explicit adapter also handles hosts without catalog enumeration RPC.
+	anime, deferred := s.animeSource(ctx, cfg, &report)
+	if deferred {
+		s.mu.RLock()
+		r.deferred = s.anime
+		s.mu.RUnlock()
 	}
-	scanGeneration := ""
-	scanReady := c.ManualRefresh
-	if !c.ManualRefresh {
-		source, err := api.ScanSource(ctx, s.manifest.GetPluginId())
-		if err != nil {
-			report.Errors = append(report.Errors, err.Error())
-			preview = true
-		} else {
-			scanGeneration = generation(c, source)
-			scanReady = store.Ready(scanGeneration)
-			if !scanReady {
-				report.Errors = append(report.Errors, "waiting for Autoscan to acknowledge its initial marker")
-				preview = true
-			}
-		}
+	sources := []*source{general}
+	if anime != nil {
+		sources = append(sources, anime)
 	}
-	if len(report.Errors) > 0 {
-		report.State = "prerequisite_failed"
-	}
-	if mode != "preview" {
-		if scanReady {
-			if _, e := store.Recover(ctx); e != nil {
+	if !r.preview {
+		for _, src := range sources {
+			if _, e := src.engine.Recover(ctx); e != nil {
 				report.Errors = append(report.Errors, e.Error())
-				report.State = "needs_attention"
-			}
-		} else {
-			for _, r := range store.Records() {
-				if r.Status == engine.Pending {
-					report.add(Row{ItemID: r.Destination.ItemID, Season: r.Destination.Season, Destination: r.ServerPath, Action: "pending", Reason: "crash recovery waits for scan source acknowledgement"})
-				}
 			}
 		}
 	}
-	reconcileRequired := false
-	reconcileOK := true
-	reconciledOwners := map[string]bool{}
-	if !c.ManualRefresh && scanReady && report.State != "prerequisite_failed" {
-		last, err := readReconciledGeneration(c.StateDir)
-		if err != nil {
-			report.Errors = append(report.Errors, err.Error())
-			report.State = "prerequisite_failed"
-			preview = true
-		} else if last != scanGeneration {
-			managed := false
-			for _, r := range store.Records() {
-				if r.Status != engine.Failed {
-					managed = true
-					break
-				}
-			}
-			if managed {
-				reconcileRequired = true
-				if mode != "reconcile" {
-					preview = true
-					report.State = "reconcile_required"
-					for _, r := range store.Records() {
-						if r.Status != engine.Failed {
-							report.add(Row{ItemID: r.Destination.ItemID, Season: r.Destination.Season, Destination: r.ServerPath, Action: "reconcile_required", Reason: "run the Reconcile task for the acknowledged scan source"})
-						}
-					}
-				}
-			} else if mode != "preview" && !preview {
-				if err := writeReconciledGeneration(c.StateDir, scanGeneration); err != nil {
-					report.Errors = append(report.Errors, err.Error())
-					report.State = "prerequisite_failed"
-					preview = true
-				}
-			}
-		}
-	}
-	found := map[string]bool{}
-	for _, lib := range libs {
-		if !slices.Contains(c.LibraryIDs, lib.ID) {
+	read := map[string][]string{}
+	// unwritable marks a run that skipped a library Silo cannot write to.
+	// The fix is a setting outside Silo, so the run does not count as the
+	// day's full run and the next hourly check tries again.
+	unwritable := false
+	for _, lib := range selected {
+		if only != nil && only[lib.ID] == nil {
 			continue
 		}
-		found[lib.ID] = true
 		if !lib.Enabled {
 			report.add(Row{Item: lib.Name, Action: "refused", Reason: "library is disabled"})
 			continue
 		}
-		if !s.anime && slices.Contains(c.AnimeLibraryIDs, lib.ID) {
-			report.add(Row{Item: lib.Name, Action: "excluded", Reason: "anime-managed library"})
+		if deferred && slices.Contains(cfg.AnimeLibraryIDs, lib.ID) {
+			report.add(Row{Item: lib.Name, Action: "excluded", Reason: "the separate AnimeThemes plugin manages this library"})
 			continue
 		}
-		// Reconcile rechecks managed files only, so it skips the library read
-		// and source lookups.
-		var inv siloapi.Inventory
-		if mode != "reconcile" {
-			s.log.Info("reading library", "library", lib.Name)
-			var err error
-			inv, err = api.InventoryProgress(ctx, lib, func(done, total int) {
-				s.setProgress("%s: reading %s, %d of %d items", taskName(mode), lib.Name, done, total)
-			})
-			if err != nil {
-				s.log.Warn("library read failed", "library", lib.Name, "error", err)
-				report.add(Row{Item: lib.Name, Action: "refused", Reason: err.Error()})
+		if problem := writable(cfg, lib); problem != "" {
+			if r.preview {
+				report.notice(problem + " Theme Songs can preview this library but cannot download to it.")
+			} else {
+				report.add(Row{Item: lib.Name, Action: "refused", Reason: problem})
+				report.Errors = append(report.Errors, problem)
+				unwritable = true
 				continue
 			}
 		}
-		// Reconcile every previously managed fallback on every normal run,
-		// including items that no longer have selected sources.
-		checked := map[string]bool{}
-		for _, r := range store.Records() {
-			if r.LibraryID == lib.ID && !checked[r.LocalPath] && mode != "preview" {
-				checked[r.LocalPath] = true
-				reconciledOwners[r.LibraryID+"\x00"+r.LocalPath] = true
-				if _, e := store.Check(ctx, r.Destination); e != nil {
-					report.Errors = append(report.Errors, e.Error())
-					reconcileOK = false
-				}
-				if mode == "reconcile" && report.State != "prerequisite_failed" {
-					if e := revalidate(ctx, api, c, r.Destination); e != nil {
-						reconcileOK = false
-						recordRevalidationFailure(&report, store, r, e)
-					} else if _, e = store.Reconcile(ctx, &r.Destination); e != nil {
-						reconcileOK = false
-						report.Errors = append(report.Errors, e.Error())
-					}
-				}
-			}
-			if r.LibraryID == lib.ID && r.Destination.Fallback {
-				if e := revalidate(ctx, api, c, r.Destination); e != nil {
-					reconcileOK = false
-					recordRevalidationFailure(&report, store, r, e)
-				}
-			}
+		s.log.Info("reading library", "library", lib.Name)
+		progress := func(done, total int) {
+			s.setProgress("%s: reading %s, %d of %d items", taskName(mode), lib.Name, done, total)
 		}
-		if mode != "preview" && !(reconcileRequired && mode != "reconcile") {
-			s.checkDiscovery(ctx, api, store, lib.ID, &report, mode == "reconcile")
+		var inv siloapi.Inventory
+		var err error
+		if only != nil {
+			inv, err = api.InventoryItems(ctx, lib, only[lib.ID], progress)
+		} else {
+			inv, err = api.InventoryProgress(ctx, lib, progress)
 		}
-		if mode == "reconcile" {
+		if err != nil {
+			s.log.Warn("library read failed", "library", lib.Name, "error", err)
+			report.add(Row{Item: lib.Name, Action: "refused", Reason: err.Error()})
 			continue
+		}
+		ids := make([]string, 0, len(inv.Items))
+		for _, item := range inv.Items {
+			ids = append(ids, item.ID)
+		}
+		read[lib.ID] = ids
+		if !r.preview {
+			for _, src := range sources {
+				s.maintain(r, src, lib.ID)
+			}
 		}
 		for i, item := range inv.Items {
 			if e := ctx.Err(); e != nil {
@@ -583,185 +681,19 @@ func (s *Server) Execute(ctx context.Context, mode string) (report Report) {
 				return
 			}
 			s.setProgress("%s: checking %s, %d of %d items, %d downloaded", taskName(mode), lib.Name, i, len(inv.Items), report.Downloaded)
-			if slices.Contains(c.ExcludeItems, item.ID) {
-				continue
-			}
-			if s.anime && item.Type != "series" {
-				continue
-			}
-			targets := []Target{{Item: item}}
-			if s.anime {
-				for _, season := range inv.Seasons[item.ID] {
-					eps := []int{}
-					for _, f := range inv.Files {
-						if f.ItemID == item.ID && f.Season == season.Number {
-							eps = append(eps, f.Episode)
-						}
-					}
-					if len(eps) > 0 {
-						targets = append(targets, Target{Item: item, Season: &season, Episodes: eps})
-					}
-				}
-			}
-			for _, target := range targets {
-				sn := -1
-				if target.Season != nil {
-					sn = target.Season.Number
-				}
-				row := Row{Item: item.Title, ItemID: item.ID, Season: sn}
-				dests, err := c.Policy.Resolve(inv, item, target.Season)
-				if err != nil {
-					row.Action = "refused"
-					row.Reason = err.Error()
-					report.add(row)
-					continue
-				}
-				candidates, err := p.Select(ctx, target)
-				if err != nil {
-					var review *provider.ReviewRequired
-					if errors.As(err, &review) {
-						row.Action = "needs_review"
-						row.Reason = "Review the candidate links, then save one URL under provider.url_overrides for this item before extraction."
-						row.Candidates = reviewCandidates(review.Candidates)
-						report.add(row)
-						continue
-					}
-					row.Action = "source_unavailable"
-					row.Reason = err.Error()
-					report.add(row)
-					continue
-				}
-				if s.anime {
-					reportObsolete(&report, store.Records(), dests, candidates)
-				}
-				if len(candidates) == 0 {
-					row.Action = "no_theme"
-					report.add(row)
-					continue
-				}
-				for _, dest := range dests {
-					for _, candidate := range candidates {
-						r := row
-						r.Destination = dest.ServerPath
-						r.Source = candidate.Provenance
-						r.Theme = candidate.Title
-						if dest.Fallback {
-							r.Reason = "series-owned theme, inherited by season/episodes; the series page plays it too"
-						}
-						if candidate.ID == "" || !audioName("theme."+strings.TrimPrefix(candidate.Extension, ".")) {
-							r.Action = "source_unavailable"
-							r.Reason = "candidate has no stable ID or supported audio format"
-							report.add(r)
-							continue
-						}
-						stableID := sourceID(candidate)
-						if !s.anime && changedSelection(store.Records(), dest, stableID) {
-							r.Action = "selection_changed"
-							r.Reason = "existing managed theme preserved; review the changed source selection"
-							report.add(r)
-							continue
-						}
-						if reason := existingAudio(dest, store.Records()); reason != "" {
-							r.Action = "preserved"
-							r.Reason = reason
-							report.add(r)
-							continue
-						}
-						if old, ok := existing(store.Records(), dest, stableID); ok {
-							r.Action = string(old.Status)
-							if old.Status == engine.Published {
-								r.Action = "destination_unconfirmed"
-							}
-							report.add(r)
-							continue
-						}
-						if preflight, ok := p.(interface {
-							Preflight(context.Context, Candidate) error
-						}); ok {
-							if e := preflight.Preflight(ctx, candidate); e != nil {
-								r.Action = "prerequisite_failed"
-								r.Reason = e.Error()
-								report.add(r)
-								continue
-							}
-						}
-						if preview {
-							r.Action = "would_download"
-							report.add(r)
-							continue
-						}
-						if report.Downloaded >= c.MaxDownloads {
-							r.Action = "deferred"
-							r.Reason = "per-run download limit"
-							report.add(r)
-							continue
-						}
-						if blocked(store.Records(), dest) {
-							r.Action = "destination_unconfirmed"
-							r.Reason = "existing theme needs discovery or operator review"
-							report.add(r)
-							continue
-						}
-						s.setProgress("%s: downloading %s", taskName(mode), item.Title)
-						staged, err := p.Fetch(ctx, candidate)
-						if err != nil {
-							s.log.Warn("download failed", "item", item.Title, "season", sn, "error", err)
-							r.Action = "download_failed"
-							r.Reason = err.Error()
-							report.add(r)
-							continue
-						}
-						if staged.Format != "mp3" {
-							err = errors.New("provider did not produce MP3 audio")
-						} else {
-							output := candidate
-							output.Extension = staged.Format
-							_, err = store.Publish(ctx, dest, stableID, filename(s.name, output), staged.Path, func(ctx context.Context) error { return revalidate(ctx, api, c, dest) })
-						}
-						if closeErr := staged.Close(); closeErr != nil {
-							report.Errors = append(report.Errors, closeErr.Error())
-						}
-						if err != nil {
-							s.log.Warn("publication refused", "item", item.Title, "season", sn, "error", err)
-							r.Action = "refused"
-							r.Reason = err.Error()
-						} else {
-							s.log.Info("theme downloaded", "item", item.Title, "season", sn, "destination", dest.ServerPath, "source", candidate.Provenance)
-							r.Action = "downloaded"
-							report.Downloaded++
-							if c.ManualRefresh {
-								r.Reason = "run a library scan, then the reconcile task"
-							} else {
-								r.Reason = "awaiting Autoscan and exact owner discovery"
-							}
-						}
-						report.add(r)
-					}
-				}
-			}
+			s.processItem(r, inv, item, general, anime)
 		}
 	}
-	for _, id := range c.LibraryIDs {
-		if !found[id] {
-			report.Errors = append(report.Errors, "selected library is unavailable: "+id)
-			report.State = "prerequisite_failed"
-		}
+	if unwritable {
+		report.Errors = append(report.Errors, "Silo's Docker Compose file mounts media read-only; remove :ro from the media volume and recreate the container.")
 	}
-	if mode == "reconcile" && !c.ManualRefresh && scanReady && report.State != "prerequisite_failed" {
-		for _, r := range store.Records() {
-			if r.Status == engine.Failed {
-				continue
-			}
-			if !reconciledOwners[r.LibraryID+"\x00"+r.LocalPath] || r.Status == engine.Pending || r.Status == engine.Protected || r.Status == engine.Stale {
-				reconcileOK = false
-			}
+	if mode == "sync" && report.State != "prerequisite_failed" && !(unwritable && only == nil) {
+		var libIDs []string
+		for _, lib := range selected {
+			libIDs = append(libIDs, lib.ID)
 		}
-		if reconcileOK {
-			if err := writeReconciledGeneration(c.StateDir, scanGeneration); err != nil {
-				report.Errors = append(report.Errors, err.Error())
-			}
-		} else if reconcileRequired {
-			report.State = "reconcile_required"
+		if e := recordRun(settings, only == nil, read, libIDs); e != nil {
+			report.Errors = append(report.Errors, "cannot save the run schedule: "+e.Error())
 		}
 	}
 	if len(report.Errors) > 0 && report.State != "prerequisite_failed" && report.State != "cancelled" {
@@ -769,9 +701,6 @@ func (s *Server) Execute(ctx context.Context, mode string) (report Report) {
 	}
 	if report.State == "complete" {
 		hasReview := false
-		if len(report.Errors) > 0 {
-			report.State = "needs_attention"
-		}
 		for _, r := range report.Rows {
 			if r.Action == "needs_review" {
 				hasReview = true
@@ -790,12 +719,375 @@ func (s *Server) Execute(ctx context.Context, mode string) (report Report) {
 	}
 	return
 }
+
+// writable describes why Silo cannot write to a library's folders, or
+// returns "" when it can.
+func writable(cfg Config, lib siloapi.Library) string {
+	for _, server := range lib.Paths {
+		local, err := cfg.Policy.Local(server)
+		if err != nil {
+			continue
+		}
+		switch err := syscall.Access(local, 2); {
+		case errors.Is(err, syscall.EROFS):
+			return fmt.Sprintf("%s is mounted read-only, so Theme Songs cannot save themes in library %s.", local, lib.Name)
+		case errors.Is(err, syscall.EACCES):
+			return fmt.Sprintf("Silo cannot write to %s, so Theme Songs cannot save themes in library %s.", local, lib.Name)
+		}
+	}
+	return ""
+}
+
+// managesItem reports whether a source has a theme record for an item.
+func managesItem(src *source, itemID string) bool {
+	if src == nil {
+		return false
+	}
+	for _, r := range src.engine.Records() {
+		if r.Destination.ItemID == itemID && r.Status != engine.Failed {
+			return true
+		}
+	}
+	return false
+}
+
+// seasonTargets returns one target per season with episodes on disk.
+func seasonTargets(inv siloapi.Inventory, item siloapi.Item) []Target {
+	var targets []Target
+	for _, season := range inv.Seasons[item.ID] {
+		eps := []int{}
+		for _, f := range inv.Files {
+			if f.ItemID == item.ID && f.Season == season.Number {
+				eps = append(eps, f.Episode)
+			}
+		}
+		if len(eps) > 0 {
+			targets = append(targets, Target{Item: item, Season: &season, Episodes: eps})
+		}
+	}
+	return targets
+}
+
+// processItem picks the source for an item and handles its targets. Series
+// that AnimeThemes maps get season themes from it; everything else gets one
+// theme from ThemerrDB. An item keeps the source that already manages it.
+func (s *Server) processItem(r *run, inv siloapi.Inventory, item siloapi.Item, general, anime *source) {
+	if slices.Contains(r.cfg.ExcludeItems, item.ID) || managesItem(r.deferred, item.ID) {
+		return
+	}
+	if item.Type == "series" && anime != nil && r.cfg.animeLibrary(inv.Library.ID) && !managesItem(general, item.ID) {
+		targets := append([]Target{{Item: item}}, seasonTargets(inv, item)...)
+		claimed := managesItem(anime, item.ID)
+		if !claimed {
+			claimed = true
+			if c, ok := anime.provider.(Claimer); ok {
+				var err error
+				if claimed, err = c.Claims(r.ctx, targets); err != nil {
+					r.report.add(Row{Item: item.Title, ItemID: item.ID, Season: -1, Action: "source_unavailable", Reason: "AnimeThemes: " + err.Error()})
+					return
+				}
+			}
+		}
+		if claimed {
+			for _, target := range targets {
+				s.processTarget(r, anime, inv, item, target)
+			}
+			return
+		}
+	}
+	if item.Type == "movie" || item.Type == "series" {
+		s.processTarget(r, general, inv, item, Target{Item: item})
+	}
+}
+
+func (s *Server) processTarget(r *run, src *source, inv siloapi.Inventory, item siloapi.Item, target Target) {
+	ctx, store, report := r.ctx, src.engine, r.report
+	sn := -1
+	if target.Season != nil {
+		sn = target.Season.Number
+	}
+	row := Row{Item: item.Title, ItemID: item.ID, Season: sn}
+	resolve := func() ([]destinations.Destination, bool) {
+		dests, err := r.cfg.Policy.Resolve(inv, item, target.Season)
+		if err != nil {
+			row.Action = "refused"
+			row.Reason = err.Error()
+			report.add(row)
+		}
+		return dests, err == nil
+	}
+	// An anime series has a theme of its own only with a manual fallback,
+	// so its folder is checked only then; its seasons have their own.
+	seriesLevel := src.anime && target.Season == nil
+	var dests []destinations.Destination
+	if !seriesLevel {
+		var ok bool
+		if dests, ok = resolve(); !ok {
+			return
+		}
+	}
+	candidates, err := src.provider.Select(ctx, target)
+	if err != nil {
+		var review *provider.ReviewRequired
+		if errors.As(err, &review) {
+			row.Action = "needs_review"
+			row.Reason = "Review the candidate links, then save one URL under provider.url_overrides for this item before extraction."
+			row.Candidates = reviewCandidates(review.Candidates)
+			report.add(row)
+			return
+		}
+		row.Action = "source_unavailable"
+		row.Reason = err.Error()
+		report.add(row)
+		return
+	}
+	if seriesLevel {
+		if len(candidates) == 0 {
+			return
+		}
+		var ok bool
+		if dests, ok = resolve(); !ok {
+			return
+		}
+	}
+	if src.anime {
+		reportObsolete(report, store.Records(), dests, candidates)
+	}
+	if len(candidates) == 0 {
+		row.Action = "no_theme"
+		report.add(row)
+		return
+	}
+	for _, dest := range dests {
+		for _, candidate := range candidates {
+			out := row
+			out.Destination = dest.ServerPath
+			out.Source = candidate.Provenance
+			out.Theme = candidate.Title
+			if dest.Fallback {
+				out.Reason = "series-owned theme, inherited by season/episodes; the series page plays it too"
+			}
+			if candidate.ID == "" || !audioName("theme."+strings.TrimPrefix(candidate.Extension, ".")) {
+				out.Action = "source_unavailable"
+				out.Reason = "candidate has no stable ID or supported audio format"
+				report.add(out)
+				continue
+			}
+			stableID := sourceID(candidate)
+			if !src.anime && changedSelection(store.Records(), dest, stableID) {
+				out.Action = "selection_changed"
+				out.Reason = "existing managed theme preserved; review the changed source selection"
+				report.add(out)
+				continue
+			}
+			if reason := existingAudio(dest, store.Records()); reason != "" {
+				out.Action = "preserved"
+				out.Reason = reason
+				report.add(out)
+				continue
+			}
+			if old, ok := existing(store.Records(), dest, stableID); ok {
+				out.Action = string(old.Status)
+				if old.Status == engine.Published {
+					out.Action = "destination_unconfirmed"
+					out.Reason = "downloaded; waiting for Silo to list it"
+				}
+				report.add(out)
+				continue
+			}
+			if preflight, ok := src.provider.(interface {
+				Preflight(context.Context, Candidate) error
+			}); ok {
+				if e := preflight.Preflight(ctx, candidate); e != nil {
+					out.Action = "prerequisite_failed"
+					out.Reason = e.Error()
+					report.add(out)
+					continue
+				}
+			}
+			if r.preview {
+				out.Action = "would_download"
+				report.add(out)
+				continue
+			}
+			if r.cfg.MaxDownloads > 0 && report.Downloaded >= r.cfg.MaxDownloads {
+				out.Action = "deferred"
+				out.Reason = "per-run download limit; the next run continues"
+				report.add(out)
+				continue
+			}
+			if blocked(store.Records(), dest) {
+				out.Action = "destination_unconfirmed"
+				out.Reason = "waiting for Silo to list the previous theme in this folder"
+				report.add(out)
+				continue
+			}
+			s.setProgress("%s: downloading %s", taskName(r.mode), item.Title)
+			staged, err := src.provider.Fetch(ctx, candidate)
+			if err != nil {
+				s.log.Warn("download failed", "item", item.Title, "season", sn, "error", err)
+				out.Action = "download_failed"
+				out.Reason = err.Error()
+				report.add(out)
+				continue
+			}
+			var published engine.Record
+			if staged.Format != "mp3" {
+				err = errors.New("provider did not produce MP3 audio")
+			} else {
+				output := candidate
+				output.Extension = staged.Format
+				published, err = store.Publish(ctx, dest, stableID, filename(src.name, output), staged.Path, func(ctx context.Context) error { return revalidate(ctx, r.api, r.cfg, dest) })
+			}
+			if closeErr := staged.Close(); closeErr != nil {
+				report.Errors = append(report.Errors, closeErr.Error())
+			}
+			if err != nil {
+				s.log.Warn("publication refused", "item", item.Title, "season", sn, "error", err)
+				out.Action = "refused"
+				out.Reason = err.Error()
+				report.add(out)
+				continue
+			}
+			s.log.Info("theme downloaded", "item", item.Title, "season", sn, "destination", dest.ServerPath, "source", candidate.Provenance)
+			out.Action = "downloaded"
+			report.Downloaded++
+			if !s.confirm(r, src, published) {
+				out.Reason = "Silo will list it after it scans the folder"
+			}
+			report.add(out)
+		}
+	}
+}
+
+// maintain rechecks a library's published themes: their files, their
+// destinations, and whether Silo lists them yet.
+func (s *Server) maintain(r *run, src *source, library string) {
+	store, report := src.engine, r.report
+	checked := map[string]bool{}
+	for _, rec := range store.Records() {
+		if rec.LibraryID != library || rec.Status == engine.Failed {
+			continue
+		}
+		if !checked[rec.LocalPath] {
+			checked[rec.LocalPath] = true
+			if _, e := store.Check(r.ctx, rec.Destination); e != nil {
+				report.Errors = append(report.Errors, e.Error())
+			}
+		}
+		switch {
+		case rec.Status == engine.Stale:
+			// A destination that resolves exactly again is restored.
+			if revalidate(r.ctx, r.api, r.cfg, rec.Destination) == nil {
+				if _, e := store.Restore(r.ctx, rec.Destination); e != nil {
+					report.Errors = append(report.Errors, e.Error())
+				}
+			}
+		case rec.Destination.Fallback && rec.Status != engine.Protected:
+			if e := revalidate(r.ctx, r.api, r.cfg, rec.Destination); e != nil {
+				recordRevalidationFailure(report, store, rec, e)
+			}
+		}
+	}
+	s.checkDiscovery(r, src, library)
+}
+
+func discoveryBackoff(attempts int) time.Duration {
+	return time.Minute << min(attempts, 8)
+}
+
+// checkDiscovery marks published themes Silo now lists, and asks Silo again
+// to scan the others, with growing waits between checks.
+func (s *Server) checkDiscovery(r *run, src *source, library string) {
+	for _, rec := range src.engine.Records() {
+		if rec.LibraryID != library || rec.Status != engine.Published {
+			continue
+		}
+		if time.Since(rec.LastAttempt) < discoveryBackoff(rec.Attempts) {
+			continue
+		}
+		found, err := s.discovered(r, src, rec)
+		if err != nil {
+			r.report.Errors = append(r.report.Errors, err.Error())
+			continue
+		}
+		if found {
+			continue
+		}
+		scan := rec.ScanRequests < maxScanRequests && !r.scanUnavailable
+		if rec, err = src.engine.MarkAttempt(rec.Destination, rec.Filename, scan); err != nil {
+			r.report.Errors = append(r.report.Errors, err.Error())
+			continue
+		}
+		if scan {
+			s.requestScan(r, rec)
+		} else if rec.ScanRequests >= maxScanRequests {
+			r.report.add(Row{ItemID: rec.Destination.ItemID, Season: rec.Destination.Season, Destination: rec.ServerPath, Theme: rec.Filename, Action: "destination_unconfirmed", Reason: "Silo has not listed this theme after repeated scans; check that the folder belongs to this item"})
+		}
+	}
+}
+
+// discovered checks whether Silo lists a published theme under its exact
+// owner, and records it when it does.
+func (s *Server) discovered(r *run, src *source, rec engine.Record) (bool, error) {
+	title := strings.TrimSuffix(rec.Filename, filepath.Ext(rec.Filename))
+	found, err := r.api.Discovered(r.ctx, rec.OwnerID, rec.LibraryID, title)
+	if err != nil || !found {
+		return false, err
+	}
+	_, err = src.engine.MarkDiscovered(rec.Destination, rec.Filename, rec.OwnerID, title)
+	return err == nil, err
+}
+
+// requestScan asks Silo to scan a published theme file. It reports whether
+// Silo accepted the request.
+func (s *Server) requestScan(r *run, rec engine.Record) bool {
+	if r.scanUnavailable {
+		return false
+	}
+	err := r.api.RequestScan(r.ctx, rec.LibraryID, filepath.Join(rec.ServerPath, "theme-music", rec.Filename))
+	switch {
+	case err == nil:
+		return true
+	case errors.Is(err, siloapi.ErrScanUnavailable):
+		r.scanUnavailable = true
+		r.report.notice("This Silo version cannot scan single folders through its API, so new themes appear after its next library scan.")
+	default:
+		r.report.notice("Silo refused a scan request (" + err.Error() + "), so some new themes appear after its next library scan.")
+	}
+	return false
+}
+
+// confirm asks Silo to scan a theme just published and waits briefly for
+// Silo to list it, so a folder can take its next theme in the same run.
+// After three slow scans in a row, later themes in the run skip the wait.
+func (s *Server) confirm(r *run, src *source, rec engine.Record) bool {
+	rec, err := src.engine.MarkAttempt(rec.Destination, rec.Filename, !r.scanUnavailable)
+	if err != nil || !s.requestScan(r, rec) || r.misses >= 3 {
+		return false
+	}
+	for _, wait := range s.confirmWaits {
+		select {
+		case <-r.ctx.Done():
+			return false
+		case <-time.After(wait):
+		}
+		found, err := s.discovered(r, src, rec)
+		if err != nil {
+			return false
+		}
+		if found {
+			r.misses = 0
+			return true
+		}
+	}
+	r.misses++
+	return false
+}
+
 func taskName(mode string) string {
-	switch mode {
-	case "sync":
+	if mode == "sync" {
 		return "Download"
-	case "reconcile":
-		return "Reconcile"
 	}
 	return "Preview"
 }
@@ -803,7 +1095,7 @@ func taskName(mode string) string {
 // logResult writes one line per run plus one per kind of problem, so a large
 // library does not produce a line per item.
 func (s *Server) logResult(r Report) {
-	s.log.Info("task finished", "task", r.Mode, "state", r.State, "downloaded", r.Downloaded, "rows", len(r.Rows), "seconds", int(time.Since(r.At).Seconds()))
+	s.log.Info("task finished", "task", r.Mode, "new_items", r.NewItems, "state", r.State, "downloaded", r.Downloaded, "rows", len(r.Rows), "seconds", int(time.Since(r.At).Seconds()))
 	for _, e := range r.Errors {
 		s.log.Warn("task error", "task", r.Mode, "error", e)
 	}
@@ -941,7 +1233,7 @@ func recordRevalidationFailure(report *Report, store *engine.Engine, r engine.Re
 			report.Errors = append(report.Errors, e.Error())
 		}
 		row.Action = "stale"
-		row.Reason = "destination ownership changed; reconcile existing audio manually"
+		row.Reason = "destination ownership changed; the file is kept, review it"
 	} else {
 		row.Action = "deferred"
 		row.Reason = "ownership check unavailable; existing file preserved for retry"
@@ -991,117 +1283,4 @@ func revalidate(ctx context.Context, api *siloapi.Client, c Config, old destinat
 		}
 	}
 	return errDestinationChanged
-}
-func (s *Server) checkDiscovery(ctx context.Context, api *siloapi.Client, store *engine.Engine, library string, report *Report, explicit bool) {
-	for _, r := range store.Records() {
-		if r.LibraryID != library || r.Status != engine.Published {
-			continue
-		}
-		if !explicit && (r.Attempts >= 10 || time.Since(r.LastAttempt) < time.Minute*time.Duration(1<<min(r.Attempts, 8))) {
-			continue
-		}
-		title := strings.TrimSuffix(r.Filename, filepath.Ext(r.Filename))
-		found, e := api.Discovered(ctx, r.OwnerID, r.LibraryID, title)
-		if e != nil {
-			report.Errors = append(report.Errors, e.Error())
-			continue
-		}
-		if _, e = store.MarkAttempt(r.Destination, r.Filename); e != nil {
-			report.Errors = append(report.Errors, e.Error())
-			continue
-		}
-		if found {
-			_, e = store.MarkDiscovered(r.Destination, r.Filename, r.OwnerID, title)
-			if e != nil {
-				report.Errors = append(report.Errors, e.Error())
-			}
-		} else if !explicit && !s.cfg.ManualRefresh && time.Since(r.Updated) > time.Minute && r.Attempts < 10 {
-			if e = revalidate(ctx, api, s.cfg, r.Destination); e == nil {
-				_, e = store.Reconcile(ctx, &r.Destination)
-			}
-			if e != nil {
-				report.Errors = append(report.Errors, e.Error())
-			}
-		}
-	}
-}
-func (s *Server) PollChanges(ctx context.Context, req *pluginv1.PollChangesRequest) (*pluginv1.PollChangesResponse, error) {
-	if req.GetCapabilityId() != "themes" {
-		return nil, errors.New("unknown scan source")
-	}
-	s.mu.RLock()
-	if s.engine == nil {
-		s.mu.RUnlock()
-		return nil, errors.New("plugin is not configured")
-	}
-	api, store, cfg, manifestID := s.client, s.engine, s.cfg, s.manifest.GetPluginId()
-	s.mu.RUnlock()
-	source, e := api.ScanSource(ctx, manifestID)
-	if e != nil {
-		return nil, e
-	}
-	libs, e := api.Libraries(ctx)
-	if e != nil {
-		return nil, e
-	}
-	allowed := map[string][]string{}
-	for _, l := range libs {
-		if slices.Contains(cfg.LibraryIDs, l.ID) && siloapi.Eligible(l) && l.Enabled {
-			allowed[l.ID] = l.Paths
-		}
-	}
-	result, e := store.Poll(generation(cfg, source), req.GetMarker(), allowed)
-	if e != nil {
-		return nil, e
-	}
-	s.mu.Lock()
-	if s.engine == store {
-		s.repairCount = result.RepairCount
-		s.repairPaths = s.repairPaths[:0]
-		for _, event := range result.Repair {
-			s.repairPaths = append(s.repairPaths, event.ServerPath)
-		}
-		s.report.RepairCount = s.repairCount
-		s.report.RepairPaths = append([]string(nil), s.repairPaths...)
-		if s.repairCount > 0 && s.report.State != "prerequisite_failed" && s.report.State != "cancelled" {
-			s.report.State = "needs_attention"
-		}
-	}
-	s.mu.Unlock()
-	out := &pluginv1.PollChangesResponse{NextMarker: result.NextMarker}
-	for _, p := range result.Paths {
-		out.Changes = append(out.Changes, &pluginv1.ScanSourceChange{SourcePath: p, Scope: pluginv1.ScanSourceChangeScope_SCAN_SOURCE_CHANGE_SCOPE_SUBTREE})
-	}
-	return out, nil
-}
-
-var page = template.Must(template.New("status").Parse(`<!doctype html><html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width"><title>Theme download status</title><style>body{font:16px system-ui,sans-serif;line-height:1.5;max-width:1200px;margin:32px auto;padding:0 24px;color:#20242b;background:#fafafa}h1{font-size:28px}h2{font-size:20px;margin-top:32px}table{border-collapse:collapse;width:100%;background:white}th,td{text-align:left;vertical-align:top;padding:12px;border-bottom:1px solid #ddd}th{font-weight:600}code{overflow-wrap:anywhere}p{max-width:75ch}small{color:#555}</style><h1>Theme download status</h1>{{if .Progress}}<p><strong>Running.</strong> {{.Progress}}. The report below is from the last finished run; reload for updates.</p>{{end}}<p>State: {{.State}}{{if .Mode}} ({{.Mode}}, {{.At.Format "2006-01-02 15:04 MST"}}){{end}}. Run the Preview, Download or Reconcile task in Silo Administration to update this report.</p>{{range .Errors}}<p>{{.}}</p>{{end}}{{if .RepairCount}}<p>{{.RepairCount}} scan paths need repair and were rejected from indexing.</p>{{range .RepairPaths}}<p><code>{{.}}</code></p>{{end}}{{end}}<p>{{.Downloaded}} files downloaded in the last run. Downloaded files need a library scan and exact owner discovery before they appear as discovered.</p>{{if .Summary}}<h2>Summary</h2><table><thead><tr><th>Count</th><th>Action</th><th>Reason</th></tr></thead><tbody>{{range .Summary}}<tr><td>{{.Count}}</td><td>{{.Action}}</td><td><small>{{.Reason}}</small></td></tr>{{end}}</tbody></table><h2>Items</h2>{{end}}<table><thead><tr><th>Item / season</th><th>Theme and source</th><th>Destination</th><th>Action</th></tr></thead><tbody>{{range .Rows}}<tr><td>{{.Item}}{{if ge .Season 0}}<br><small>Season {{.Season}}</small>{{end}}</td><td>{{.Theme}}<br><small>{{.Source}}</small></td><td><code>{{.Destination}}</code></td><td>{{.Action}}<br><small>{{.Reason}}</small>{{range .Candidates}}<br><a href="{{.URL}}" target="_blank" rel="noopener noreferrer">{{.Title}}</a> <small>{{.Channel}} (score {{.Score}})</small>{{end}}</td></tr>{{end}}</tbody></table>{{if .Truncated}}<p>This page shows 1,000 rows, problems and planned downloads first. The summary counts every item.</p>{{end}}</html>`))
-
-func (s *Server) Handle(_ context.Context, req *pluginv1.HandleHTTPRequest) (*pluginv1.HandleHTTPResponse, error) {
-	if req.GetMethod() != "GET" {
-		return &pluginv1.HandleHTTPResponse{StatusCode: 405}, nil
-	}
-	s.mu.RLock()
-	r := s.report
-	s.mu.RUnlock()
-	var b []byte
-	contentType := "application/json"
-	switch req.GetPath() {
-	case "/status":
-		var err error
-		b, err = json.Marshal(r)
-		if err != nil {
-			return nil, err
-		}
-	case "/":
-		var buf bytes.Buffer
-		if err := page.Execute(&buf, r); err != nil {
-			return nil, err
-		}
-		b = buf.Bytes()
-		contentType = "text/html; charset=utf-8"
-	default:
-		return &pluginv1.HandleHTTPResponse{StatusCode: 404}, nil
-	}
-	return &pluginv1.HandleHTTPResponse{StatusCode: 200, Headers: map[string]string{"Content-Type": contentType, "Cache-Control": "no-store", "Content-Security-Policy": "default-src 'none'; style-src 'unsafe-inline'; frame-ancestors 'self'", "X-Content-Type-Options": "nosniff"}, Body: b}, nil
 }
