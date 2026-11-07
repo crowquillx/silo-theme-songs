@@ -612,3 +612,19 @@ func hasAction(rows []Row, action string) bool {
 	}
 	return false
 }
+
+func TestSeasonTargetsCarryFilePaths(t *testing.T) {
+	item := siloapi.Item{ID: "show", Type: "series"}
+	inv := siloapi.Inventory{
+		Seasons: map[string][]siloapi.Season{"show": {{Number: 1}, {Number: 2}}},
+		Files: []siloapi.Membership{
+			{File: siloapi.File{Path: "/vfs/Show/Season 01/a.mkv"}, ItemID: "show", Season: 1, Episode: 1},
+			{File: siloapi.File{Path: "/vfs/Show/Season 02/b.mkv"}, ItemID: "show", Season: 2, Episode: 1},
+			{File: siloapi.File{Path: "/vfs/Other/Season 01/c.mkv"}, ItemID: "other", Season: 1, Episode: 1},
+		},
+	}
+	targets := seasonTargets(inv, item)
+	if len(targets) != 2 || len(targets[1].Paths) != 1 || targets[1].Paths[0] != "/vfs/Show/Season 02/b.mkv" {
+		t.Fatalf("targets = %#v", targets)
+	}
+}

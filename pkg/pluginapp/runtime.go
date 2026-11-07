@@ -756,13 +756,15 @@ func seasonTargets(inv siloapi.Inventory, item siloapi.Item) []Target {
 	var targets []Target
 	for _, season := range inv.Seasons[item.ID] {
 		eps := []int{}
+		paths := []string{}
 		for _, f := range inv.Files {
 			if f.ItemID == item.ID && f.Season == season.Number {
 				eps = append(eps, f.Episode)
+				paths = append(paths, f.Path)
 			}
 		}
 		if len(eps) > 0 {
-			targets = append(targets, Target{Item: item, Season: &season, Episodes: eps})
+			targets = append(targets, Target{Item: item, Season: &season, Episodes: eps, Paths: paths})
 		}
 	}
 	return targets

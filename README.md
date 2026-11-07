@@ -50,6 +50,8 @@ Only the API key is required. The settings form groups the rest:
 
 **Writable roots and path mappings** accept `allowed_roots`, `path_mappings` (`[{"server": "/media", "local": "/mnt/media"}]`), `single_season_flat_fallback` and `destination_overrides`.
 
+Libraries built by the [ShokoAnime VFS](https://github.com/crowquillx/silo-shoko-plugin) plugin work without TVDB or TMDB IDs: each file name carries its AniDB anime as `[AniDB Anime=<id>]`, which identifies every season exactly. That plugin also copies the themes saved here back to your real media folders.
+
 Use separate movie or series folders, with `Season NN` or `Specials` folders inside series. Anime season themes go into those season folders. Media files may be symlinks, but the plugin refuses other symlinks inside a media folder.
 
 ### How Silo runs the plugin
