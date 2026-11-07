@@ -3,6 +3,7 @@ package anime
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -10,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/crowquillx/silo-theme-songs/internal/mapping"
 	"github.com/crowquillx/silo-theme-songs/pkg/pluginapp"
 	"github.com/crowquillx/silo-theme-songs/pkg/provider"
 	"github.com/crowquillx/silo-theme-songs/pkg/siloapi"
@@ -125,5 +127,45 @@ func TestSwitchesOverrideAnimeJSON(t *testing.T) {
 	c := p.(*Adapter).config
 	if !enabled(c.OP) || enabled(c.ED) || !c.AllowNSFW || !c.AllowSpoiler {
 		t.Fatalf("switches did not override JSON: %+v", c)
+	}
+}
+
+// A Shoko VFS library names every file with its AniDB anime, which identifies
+// each season exactly, without TVDB or TMDB IDs or the mapping data.
+func TestShokoFileNamesIdentifySeasons(t *testing.T) {
+	unavailable := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusServiceUnavailable) }))
+	defer unavailable.Close()
+	cfg, _ := json.Marshal(ProviderConfig{AniBridgeURL: unavailable.URL, AnimeListsURL: unavailable.URL})
+	p, e := New(pluginapp.Config{StateDir: t.TempDir(), FFprobe: "ffprobe", AnimeProvider: cfg})
+	if e != nil {
+		t.Fatal(e)
+	}
+	a := p.(*Adapter)
+	item := siloapi.Item{ID: "shoko-show", Type: "series"}
+	season := func(n int, paths ...string) pluginapp.Target {
+		return pluginapp.Target{Item: item, Season: &siloapi.Season{Number: n}, Paths: paths}
+	}
+	named := func(anime int, episode int) string {
+		return fmt.Sprintf("/vfs/Show (2020)/Season 02/Show - S02E%02d [Shoko Group=1] [Shoko Series=7] [AniDB Anime=%d] [Shoko Episode=4%d] [Shoko File=9%d].mkv", episode, anime, episode, episode)
+	}
+
+	got, e := a.resolve(season(2, named(1001, 1), named(1001, 2)))
+	if e != nil || got.Status != mapping.Resolved || len(got.Matches) != 1 || got.Matches[0].AniDBID != "1001" || got.Matches[0].Source != "filename" {
+		t.Fatalf("resolve = %#v, %v", got, e)
+	}
+	if got, _ := a.resolve(season(2, named(1001, 1), named(1002, 2))); got.Status != mapping.Ambiguous {
+		t.Fatalf("mixed anime = %#v, want ambiguous", got)
+	}
+	if _, ok := fileMatch(season(0, named(1001, 1))); ok {
+		t.Fatal("specials were matched to one anime")
+	}
+	if _, ok := fileMatch(season(1, "/media/Show/Season 01/Show - S01E01.mkv")); ok {
+		t.Fatal("a file without the marker was matched")
+	}
+
+	// The mapping download fails, yet the Shoko show is still claimed.
+	claimed, e := a.Claims(context.Background(), []pluginapp.Target{{Item: item}, season(2, named(1001, 1))})
+	if e != nil || !claimed {
+		t.Fatalf("Claims = %v, %v", claimed, e)
 	}
 }

@@ -278,6 +278,9 @@ type Target struct {
 	Item     siloapi.Item
 	Season   *siloapi.Season
 	Episodes []int
+	// Paths are the library paths of the season's files. A library built by
+	// the Shoko VFS plugin names each file with its AniDB anime ID.
+	Paths []string
 }
 type Provider interface {
 	Select(context.Context, Target) ([]Candidate, error)

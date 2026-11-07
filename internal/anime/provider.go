@@ -9,6 +9,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"regexp"
 	"slices"
 	"strconv"
 	"strings"
@@ -196,6 +197,40 @@ func targetKey(t pluginapp.Target) string {
 func mapKey(provider, id string, season int) string {
 	return fmt.Sprintf("%s:%s:s%d", provider, id, season)
 }
+
+// aniDBMarker is the AniDB anime ID the Shoko VFS plugin puts in each file
+// name, as in "Show - S01E01 [Shoko Series=7] [AniDB Anime=1001] ...mkv".
+var aniDBMarker = regexp.MustCompile(`\[AniDB Anime=([1-9][0-9]*)\]`)
+
+// fileMatch reads a season's AniDB anime from its file names. It is exact, so
+// it needs no mapping data and comes before any mapping lookup. Season zero is
+// left out: its specials can come from several anime and have no themes of
+// their own.
+func fileMatch(t pluginapp.Target) (mapping.Result, bool) {
+	if t.Season == nil || t.Season.Number < 1 {
+		return mapping.Result{}, false
+	}
+	var ids []string
+	for _, p := range t.Paths {
+		for _, m := range aniDBMarker.FindAllStringSubmatch(filepath.Base(p), -1) {
+			if !slices.Contains(ids, m[1]) {
+				ids = append(ids, m[1])
+			}
+		}
+	}
+	switch len(ids) {
+	case 0:
+		return mapping.Result{}, false
+	case 1:
+		return mapping.Result{
+			Status:     mapping.Resolved,
+			Matches:    []mapping.Match{{AniDBID: ids[0], Source: "filename", CoverageUnknown: true}},
+			Provenance: mapping.Source{Version: "filename"},
+		}, true
+	}
+	return mapping.Result{Status: mapping.Ambiguous, Reason: "season files name several AniDB anime: " + strings.Join(ids, ", ")}, true
+}
+
 func (a *Adapter) resolve(t pluginapp.Target) (mapping.Result, error) {
 	if t.Season == nil {
 		ids := a.config.SeriesFallback[t.Item.ID]
@@ -210,6 +245,9 @@ func (a *Adapter) resolve(t pluginapp.Target) (mapping.Result, error) {
 			matches = append(matches, mapping.Match{AniDBID: id, Source: "manual", CoverageUnknown: true})
 		}
 		return mapping.Result{Status: mapping.Resolved, Matches: matches, Provenance: mapping.Source{Version: "manual"}}, nil
+	}
+	if mapped, ok := fileMatch(t); ok {
+		return mapped, nil
 	}
 	r := a.mapping.Resolver()
 	n := t.Season.Number
@@ -285,6 +323,11 @@ func (a *Adapter) Claims(ctx context.Context, targets []pluginapp.Target) (bool,
 		if t.Season == nil && len(a.config.SeriesFallback[t.Item.ID]) > 0 {
 			return true, nil
 		}
+		// File names identify the anime without the mapping data, so a Shoko
+		// library is claimed even while the mapping download is unavailable.
+		if mapped, ok := fileMatch(t); ok && mapped.Status != mapping.Missing {
+			return true, nil
+		}
 	}
 	if e := a.refresh(ctx); e != nil {
 		return false, e
@@ -308,12 +351,15 @@ func (a *Adapter) Select(ctx context.Context, t pluginapp.Target) ([]pluginapp.C
 	if t.Season == nil && len(a.config.SeriesFallback[t.Item.ID]) == 0 {
 		return nil, nil
 	}
-	if e := a.refresh(ctx); e != nil {
-		return nil, e
-	}
-	mapped, e := a.resolve(t)
-	if e != nil {
-		return nil, e
+	mapped, fromFiles := fileMatch(t)
+	if !fromFiles {
+		if e := a.refresh(ctx); e != nil {
+			return nil, e
+		}
+		var e error
+		if mapped, e = a.resolve(t); e != nil {
+			return nil, e
+		}
 	}
 	if mapped.Status == mapping.Ambiguous {
 		return nil, fmt.Errorf("anime mapping ambiguous: %s", mapped.Reason)
