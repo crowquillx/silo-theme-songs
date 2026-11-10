@@ -168,7 +168,13 @@ type Server struct {
 	// legacyAnime reports whether the separate AnimeThemes plugin runs.
 	legacyAnime func(context.Context) bool
 	// auto turns on automatic runs; the CLI leaves it off.
-	auto         bool
+	auto bool
+	// active is set by the first task, event or page request. Automatic runs
+	// wait for it; see activate.
+	active bool
+	// stopAuto ends the current automate loop; loops counts the loops started.
+	stopAuto     context.CancelFunc
+	loops        int
 	startDelay   time.Duration
 	scanDelay    time.Duration
 	confirmWaits []time.Duration
@@ -216,10 +222,13 @@ func (s *Server) stopJobs() {
 	}
 }
 
-// configure receives Silo's saved settings. Silo calls it when the plugin
-// starts and restarts the plugin after the settings are saved. Settings the
-// plugin cannot use leave it unconfigured with the problem on its status
-// page, so the page and the settings check keep working.
+// configure receives Silo's settings. Silo calls it when it starts the plugin.
+// After an administrator saves the settings, Silo stops the plugin and starts
+// it again only for the next task, event or page request. Silo also calls
+// configure with unsaved settings on a temporary process for Check
+// Connection, so configure starts no runs; see activate. Settings the plugin
+// cannot use leave it unconfigured with the problem on its status page, so
+// the page and the settings check keep working.
 func (s *Server) configure(ctx context.Context, entries []*pluginv1.ConfigEntry) error {
 	var raw map[string]any
 	for _, entry := range entries {
@@ -273,6 +282,7 @@ func (s *Server) unconfigure(problem error) error {
 	s.client = nil
 	s.cfg = Config{}
 	s.configErr = problem
+	s.automateLocked()
 	s.report = Report{State: "not_configured", Rows: []Row{}}
 	s.newReport = Report{}
 	return err
@@ -345,13 +355,10 @@ func (s *Server) ConfigureLocal(ctx context.Context, cfg Config) error {
 	if s.report.State == "not_configured" {
 		s.report = Report{State: "configured", Rows: []Row{}}
 	}
-	jobs := s.jobCtx
+	s.automateLocked()
 	s.mu.Unlock()
 	s.work.Unlock()
 	s.log.Info("configured", "silo_url", cfg.siloURL, "libraries", cfg.LibraryIDs, "skipped_libraries", cfg.SkipLibraryIDs, "state_dir", cfg.StateDir, "dry_run", cfg.dryRun(), "anime_themes", cfg.animeEnabled(), "primary_profile", cfg.ProfileID == "")
-	if s.auto {
-		go s.automate(jobs, cfg)
-	}
 	return nil
 }
 
@@ -439,6 +446,7 @@ func taskMode(key string) string {
 }
 
 func (s *Server) Run(ctx context.Context, req *pluginv1.RunScheduledTaskRequest) (*pluginv1.RunScheduledTaskResponse, error) {
+	s.activate()
 	mode := taskMode(req.GetTaskKey())
 	if mode == "" {
 		return nil, errors.New("unknown theme task")
