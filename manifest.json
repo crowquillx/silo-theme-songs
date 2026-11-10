@@ -16,8 +16,8 @@
   "presentation": {
     "display_name": "Theme Songs",
     "summary": "Downloads theme songs for movies and series, with season openings and endings for anime from AnimeThemes.",
-    "description_markdown": "Downloads theme audio for movies and series from ThemerrDB, and opening and ending themes for anime series from AnimeThemes. Themes are saved as MP3 in each item's `theme-music` folder, and existing themes are never replaced. Theme Songs runs on its own once a day and after Silo scans new items.\n\nAnimeThemes was a separate plugin before version 0.2.0. Uninstall it after installing this version; Theme Songs keeps managing the themes it downloaded.",
-    "setup_markdown": "1. Create an API key in **Administration → API Keys**, paste it into **Silo API key** and save.\n2. Open **Theme Songs** in the admin menu. The first run starts shortly after, and the page lets you choose libraries.\n\nSilo writes themes into your media folders, so they must be writable. Silo's Docker Compose file mounts media read-only; remove `:ro` from the media volume and recreate the container. Restart Silo to see **Download Theme Songs** in Scheduled Tasks.",
+    "description_markdown": "Downloads theme audio for movies and series from ThemerrDB, and opening and ending themes for anime series from AnimeThemes. Themes are saved as MP3 in each item's `theme-music` folder, and existing themes are never replaced. Theme Songs runs when Silo starts and after Silo scans new items, and once a day while the plugin stays running.\n\nAnimeThemes was a separate plugin before version 0.2.0. Uninstall it after installing this version; Theme Songs keeps managing the themes it downloaded.",
+    "setup_markdown": "1. Create an API key in **Administration → API Keys**, paste it into **Silo API key** and save.\n2. Open **Theme Songs** in the admin menu. The first run starts shortly after, and the page lets you choose libraries.\n\nSilo writes themes into your media folders, so they must be writable. Silo's Docker Compose file mounts media read-only; remove `:ro` from the media volume and recreate the container. Restart Silo to see **Download Theme Songs** in **Scheduled Tasks**.\n\nThe daily run needs the plugin to stay running, and Silo stops the plugin when you save its settings. For a run every day, open **Download Theme Songs** in **Administration → Scheduled Tasks**, choose **Edit Schedule** and **Add Trigger**, set the trigger to **Daily** and save.\n\nOn Silo versions without plugin settings checks, **Check Connection** says connection checks are not supported for this plugin. That is not an error.",
     "homepage_url": "https://github.com/crowquillx/silo-theme-songs",
     "source_url": "https://github.com/crowquillx/silo-theme-songs",
     "support_url": "https://github.com/crowquillx/silo-theme-songs/issues",
@@ -31,7 +31,7 @@
       "type": "scheduled_task.v1",
       "id": "sync",
       "display_name": "Download Theme Songs",
-      "description": "Downloads movie and series themes. Theme Songs also runs on its own; add triggers here for extra runs."
+      "description": "Downloads movie and series themes. Theme Songs also runs after library scans; add a daily trigger here for a run every day."
     },
     {
       "type": "event_consumer.v1",
@@ -55,7 +55,7 @@
       "title": "Theme Songs settings",
       "description": "Only the API key is required.",
       "json_schema": "{\"type\":\"object\",\"properties\":{\"api_key\":{\"type\":\"string\",\"minLength\":1},\"library_ids\":{\"anyOf\":[{\"type\":\"array\",\"items\":{\"type\":\"string\"}},{\"type\":\"string\"}]},\"skip_library_ids\":{\"anyOf\":[{\"type\":\"array\",\"items\":{\"type\":\"string\"}},{\"type\":\"string\"}]},\"dry_run\":{\"type\":\"boolean\",\"default\":false},\"anime_themes\":{\"type\":\"boolean\",\"default\":true},\"anime_openings\":{\"type\":\"boolean\",\"default\":true},\"anime_endings\":{\"type\":\"boolean\",\"default\":true},\"anime_spoilers\":{\"type\":\"boolean\",\"default\":false},\"anime_nsfw\":{\"type\":\"boolean\",\"default\":false},\"assisted_search\":{\"type\":\"boolean\",\"default\":false},\"anime_library_ids\":{\"anyOf\":[{\"type\":\"array\",\"items\":{\"type\":\"string\"}},{\"type\":\"string\"}]},\"exclude_items\":{\"anyOf\":[{\"type\":\"array\",\"items\":{\"type\":\"string\"}},{\"type\":\"string\"}]},\"max_downloads\":{\"type\":\"integer\",\"minimum\":0,\"maximum\":10000,\"default\":0},\"manage_tools\":{\"type\":\"boolean\",\"default\":true},\"base_url\":{\"type\":\"string\"},\"profile_id\":{\"type\":\"string\"},\"state_dir\":{\"type\":\"string\"},\"ffprobe\":{\"type\":\"string\"},\"destinations\":{\"anyOf\":[{\"type\":\"object\",\"properties\":{\"allowed_roots\":{\"type\":\"array\",\"items\":{\"type\":\"string\"},\"minItems\":1},\"path_mappings\":{\"type\":\"array\",\"items\":{\"type\":\"object\",\"properties\":{\"server\":{\"type\":\"string\"},\"local\":{\"type\":\"string\"}},\"required\":[\"server\",\"local\"],\"additionalProperties\":false}},\"single_season_flat_fallback\":{\"type\":\"boolean\",\"default\":false},\"destination_overrides\":{\"type\":\"object\",\"additionalProperties\":{\"type\":\"string\"}}},\"additionalProperties\":false},{\"type\":\"string\"}]},\"provider\":{\"anyOf\":[{\"type\":\"object\"},{\"type\":\"string\"}]},\"anime_provider\":{\"anyOf\":[{\"type\":\"object\"},{\"type\":\"string\"}]},\"preview_only\":{\"type\":\"boolean\"},\"manual_refresh\":{\"type\":\"boolean\"},\"source_generation\":{\"type\":\"string\"}},\"required\":[\"api_key\"],\"additionalProperties\":false}",
-      "required": false,
+      "required": true,
       "admin_form": {
         "fields": [
           {
