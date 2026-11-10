@@ -546,6 +546,10 @@ func TestAutomaticFullRunWhenDue(t *testing.T) {
 	if e := s.ConfigureLocal(context.Background(), cfg); e != nil {
 		t.Fatal(e)
 	}
+	// Silo's first request turns automatic runs on.
+	if _, e := s.Handle(context.Background(), &pluginv1.HandleHTTPRequest{Method: "GET", Path: "/status"}); e != nil {
+		t.Fatal(e)
+	}
 	deadline := time.Now().Add(5 * time.Second)
 	for p.calls.Load() == 0 {
 		if time.Now().After(deadline) {
@@ -562,6 +566,220 @@ func TestAutomaticFullRunWhenDue(t *testing.T) {
 			t.Fatal("automatic run not recorded")
 		}
 		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+// autoLoops reports whether automatic runs are on and how many automate loops
+// have started.
+func autoLoops(s *Server) (bool, int) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.active, s.loops
+}
+
+// Check Connection configures a temporary plugin process with unsaved
+// settings, checks them and stops the process. It must not start a run.
+func TestConfigureAloneStartsNoRun(t *testing.T) {
+	ctx := context.Background()
+	silo := newFakeSilo(t, "movies")
+	silo.addMovie("movie:1", "First")
+	p := &fakeProvider{staged: stagedAudio(t)}
+	s, _ := newTestServer(t, silo, p, nil)
+	s.auto, s.startDelay = true, 10*time.Millisecond
+	value, _ := structpb.NewStruct(map[string]any{"api_key": "fixture-secret", "profile_id": "primary", "base_url": silo.URL, "state_dir": t.TempDir()})
+	entries := []*pluginv1.ConfigEntry{{Key: "settings", Value: value}}
+	if e := s.configure(ctx, entries); e != nil || s.general == nil {
+		t.Fatalf("configure: %v %v", e, s.configErr)
+	}
+	if r, e := s.TestConfiguration(ctx, &pluginv1.TestConfigurationRequest{Config: entries}); e != nil || !r.Ok {
+		t.Fatalf("settings check: %+v %v", r, e)
+	}
+	// Configuring again, as a later settings change would, starts nothing either.
+	if e := s.configure(ctx, entries); e != nil {
+		t.Fatal(e)
+	}
+	time.Sleep(300 * time.Millisecond)
+	active, loops := autoLoops(s)
+	s.mu.RLock()
+	jobs, mode := len(s.jobs), s.report.Mode
+	s.mu.RUnlock()
+	if active || loops != 0 || jobs != 0 || mode != "" || p.calls.Load() != 0 {
+		t.Fatalf("configure started automatic runs: active=%v loops=%d jobs=%d last run %q downloads=%d", active, loops, jobs, mode, p.calls.Load())
+	}
+}
+
+func TestFirstRequestStartsAutomaticRunsOnce(t *testing.T) {
+	ctx := context.Background()
+	requests := map[string]func(*Server) error{
+		"task": func(s *Server) error {
+			_, e := s.Run(ctx, &pluginv1.RunScheduledTaskRequest{TaskKey: "plugin:1:preview"})
+			return e
+		},
+		"event": func(s *Server) error {
+			_, e := s.HandleEvent(ctx, &pluginv1.HandleEventRequest{EventName: "other"})
+			return e
+		},
+		"page": func(s *Server) error {
+			_, e := s.Handle(ctx, &pluginv1.HandleHTTPRequest{Method: "GET", Path: "/status"})
+			return e
+		},
+	}
+	for name, request := range requests {
+		t.Run(name, func(t *testing.T) {
+			silo := newFakeSilo(t, "movies")
+			s, cfg := newTestServer(t, silo, &fakeProvider{}, nil)
+			s.auto, s.startDelay = true, time.Hour
+			if e := s.ConfigureLocal(ctx, cfg); e != nil {
+				t.Fatal(e)
+			}
+			if active, loops := autoLoops(s); active || loops != 0 {
+				t.Fatalf("before the request: active=%v loops=%d", active, loops)
+			}
+			if e := request(s); e != nil {
+				t.Fatal(e)
+			}
+			if active, loops := autoLoops(s); !active || loops != 1 {
+				t.Fatalf("after the request: active=%v loops=%d", active, loops)
+			}
+			// Later requests of every kind leave the one loop running.
+			for _, again := range requests {
+				if e := again(s); e != nil {
+					t.Fatal(e)
+				}
+			}
+			if _, loops := autoLoops(s); loops != 1 {
+				t.Fatalf("%d loops after more requests", loops)
+			}
+		})
+	}
+}
+
+// A request before the settings arrive starts the loop once they do, and new
+// settings in a running plugin replace the loop and get their own full run.
+func TestAutomaticRunsFollowNewSettings(t *testing.T) {
+	ctx := context.Background()
+	silo := newFakeSilo(t, "movies")
+	silo.addMovie("movie:1", "First")
+	s, cfg := newTestServer(t, silo, &fakeProvider{staged: stagedAudio(t)}, nil)
+	s.auto, s.startDelay = true, 10*time.Millisecond
+	if _, e := s.Handle(ctx, &pluginv1.HandleHTTPRequest{Method: "GET", Path: "/status"}); e != nil {
+		t.Fatal(e)
+	}
+	if active, loops := autoLoops(s); !active || loops != 0 {
+		t.Fatalf("unconfigured: active=%v loops=%d", active, loops)
+	}
+	recorded := func(cfg Config) {
+		t.Helper()
+		want := cfg.withDefaults(ctx, "test.plugin").fingerprint()
+		deadline := time.Now().Add(5 * time.Second)
+		for {
+			if saved, _ := readSchedule(cfg.StateDir); saved.Settings == want {
+				return
+			}
+			if time.Now().After(deadline) {
+				t.Fatal("no automatic run with the new settings")
+			}
+			time.Sleep(10 * time.Millisecond)
+		}
+	}
+	if e := s.ConfigureLocal(ctx, cfg); e != nil {
+		t.Fatal(e)
+	}
+	recorded(cfg)
+	cfg.MaxDownloads = 5
+	if e := s.ConfigureLocal(ctx, cfg); e != nil {
+		t.Fatal(e)
+	}
+	recorded(cfg)
+	if _, loops := autoLoops(s); loops != 2 {
+		t.Fatalf("%d loops after two configurations", loops)
+	}
+	// Settings the plugin cannot use stop the loop.
+	if e := s.configure(ctx, nil); e != nil {
+		t.Fatal(e)
+	}
+	s.mu.RLock()
+	loops, running := s.loops, s.stopAuto != nil
+	s.mu.RUnlock()
+	if loops != 2 || running {
+		t.Fatalf("loops=%d running=%v after clearing the settings", loops, running)
+	}
+}
+
+func TestStatusPageFollowsHostTheme(t *testing.T) {
+	ctx := context.Background()
+	silo := newFakeSilo(t, "movies")
+	s, cfg := newTestServer(t, silo, &fakeProvider{}, nil)
+	if e := s.ConfigureLocal(ctx, cfg); e != nil {
+		t.Fatal(e)
+	}
+	themed := func(theme string) *structpb.Struct {
+		q, _ := structpb.NewStruct(map[string]any{"theme": theme})
+		return q
+	}
+	get := func(q *structpb.Struct) string {
+		t.Helper()
+		r, e := s.Handle(ctx, &pluginv1.HandleHTTPRequest{Method: "GET", Path: "/", Query: q})
+		if e != nil || r.StatusCode != 200 {
+			t.Fatalf("page: %v %d", e, r.GetStatusCode())
+		}
+		if csp := r.Headers["Content-Security-Policy"]; csp != "default-src 'none'; style-src 'unsafe-inline'; form-action 'self'; frame-ancestors 'self'" {
+			t.Fatalf("CSP %q", csp)
+		}
+		return string(r.Body)
+	}
+	// Without a theme the browser's preference decides.
+	body := get(nil)
+	if !strings.Contains(body, `<html lang="en">`) || !strings.Contains(body, "@media (prefers-color-scheme:dark){:root:not([data-theme]){color-scheme:dark;") || !strings.Contains(body, ":root[data-theme=dark]{color-scheme:dark;") {
+		t.Fatalf("page without a theme: %.900s", body)
+	}
+	if strings.Contains(body, "?theme=") || strings.Contains(body, "<script") {
+		t.Fatal("page without a theme carries one, or has a script")
+	}
+	for theme, scheme := range map[string]string{"midnight-cinema": "dark", "oxblood-noir": "dark", "cinema-light": "light"} {
+		body := get(themed(theme))
+		for _, want := range []string{`<html lang="en" data-theme="` + scheme + `">`, `action="run?theme=` + theme + `"`, `action="libraries?theme=` + theme + `"`} {
+			if !strings.Contains(body, want) {
+				t.Errorf("theme %s: page lacks %s", theme, want)
+			}
+		}
+	}
+	// Unknown values select nothing and never reach the page.
+	for _, theme := range []string{"neon", "dark", `"><script>alert(1)</script>`, "midnight-cinema;x", "MIDNIGHT-CINEMA"} {
+		body := get(themed(theme))
+		if !strings.Contains(body, `<html lang="en">`) || strings.Contains(body, "?theme=") || strings.Contains(body, "neon") || strings.Contains(body, "alert") || strings.Contains(body, "MIDNIGHT") {
+			t.Errorf("unknown theme %q reached the page", theme)
+		}
+	}
+	// Silo may send a repeated parameter as a list.
+	list, _ := structpb.NewStruct(map[string]any{"theme": []any{"midnight-cinema", "cinema-light"}})
+	if body := get(list); !strings.Contains(body, `data-theme="dark"`) {
+		t.Error("theme list ignored")
+	}
+}
+
+func TestRedirectsKeepHostTheme(t *testing.T) {
+	ctx := context.Background()
+	s := New(&pluginv1.PluginManifest{}, nil, nil)
+	defer s.Close()
+	themed := func(theme string) *structpb.Struct {
+		q, _ := structpb.NewStruct(map[string]any{"theme": theme})
+		return q
+	}
+	for _, c := range []struct {
+		query *structpb.Struct
+		want  string
+	}{{nil, "./"}, {themed("midnight-cinema"), "./?theme=midnight-cinema"}, {themed("cinema-light"), "./?theme=cinema-light"}, {themed("neon"), "./"}, {themed("x\r\nSet-Cookie: a=b"), "./"}, {themed("midnight-cinema&saved=libraries"), "./"}} {
+		r, e := s.Handle(ctx, &pluginv1.HandleHTTPRequest{Method: "POST", Path: "/run", Body: []byte("mode=sync"), Query: c.query})
+		if e != nil || r.StatusCode != 303 || r.Headers["Location"] != c.want {
+			t.Errorf("run with %v: %d %q %v; want %q", c.query, r.GetStatusCode(), r.GetHeaders()["Location"], e, c.want)
+		}
+	}
+	if got := pageURL("midnight-cinema", "libraries"); got != "./?saved=libraries&theme=midnight-cinema" {
+		t.Errorf("libraries redirect %q", got)
+	}
+	if got := pageURL("", "libraries"); got != "./?saved=libraries" {
+		t.Errorf("libraries redirect without a theme %q", got)
 	}
 }
 

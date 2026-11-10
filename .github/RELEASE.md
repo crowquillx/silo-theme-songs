@@ -1,7 +1,9 @@
-Theme Songs v0.2.2
+Theme Songs v0.2.3
 
-- Owner lock and marker errors now name the media folder, such as `owner lock in "/mnt/remote/media/tv/Show": permission denied`. Before, the log said only `openat .silo-theme-download.lock: permission denied`.
-- Each run warns when **AnimeThemes libraries** or **Skip these libraries** names a library that does not exist in Silo. If none of the AnimeThemes libraries exist, the status page says AnimeThemes will not run. The setting still applies as written.
-- When a media folder holds a symlink Silo did not list, the plugin reads that item's files again before deciding. Tools such as Shoko's VFS add episode symlinks during a long run. If the symlink is still unknown, the item is deferred to the next run instead of refused. Unknown symlinks are still never followed or written through.
+- The Theme Songs page follows Silo's theme, and your browser's light or dark setting when Silo sends none. Before, the page was always light, and **Download now** and **Save libraries** dropped the theme.
+- The plugins page shows **Needs setup** for Theme Songs until you save an API key. Before, the settings were marked optional, so the plugin looked ready without one.
+- The README, the setup notes and the Theme Songs page now say that the daily run needs the plugin to stay running. Silo stops the plugin when you save its settings, until the next library scan, page visit or task run. For a run every day, add a **Daily** trigger to **Download Theme Songs** in **Scheduled Tasks**. Before, they said it runs once a day on its own.
+- Automatic runs start with the first task, library scan or page request, not when the plugin receives its settings, so a temporary plugin process that Silo starts only to check unsaved settings cannot begin a download run.
+- The setup notes explain that "Connection checks are not supported for this plugin yet." after **Check Connection** is not an error on Silo versions without plugin settings checks.
 
 Linux amd64 and arm64 binaries and checksums are attached.

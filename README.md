@@ -10,7 +10,7 @@ Part of [Crowquillx Silo Plugins](https://github.com/crowquillx/crowquillx-silo-
 2. Create a key in **Administration → API Keys**, paste it into the plugin's **Silo API key** setting and save.
 3. Open **Theme Songs** in the admin menu. The first run starts shortly after, and the page lets you choose libraries.
 
-That's all. Theme Songs uses every movie and series library and runs on its own: once a day, after Silo scans a library with new items, and when Silo starts. After it saves a theme, it asks Silo to scan that folder, so the theme plays right away.
+That's all. Theme Songs uses every movie and series library and runs on its own: when Silo starts, after Silo scans a library with new items, and once a day while the plugin stays running. For a guaranteed daily run, [add a daily trigger](#how-silo-runs-the-plugin). After it saves a theme, it asks Silo to scan that folder, so the theme plays right away.
 
 Silo writes themes into your media folders, so they must be writable. Silo's Docker Compose file mounts media read-only. Remove `:ro` from the media volume and recreate the container. The Theme Songs page and every run say which library is read-only. Like Jellyfin's theme plugins, Theme Songs leaves the permissions of new themes and `theme-music` folders to Silo's umask, so with the usual umask of `022` other programs that read your media can read them.
 
@@ -56,9 +56,10 @@ Use separate movie or series folders, with `Season NN` or `Specials` folders ins
 
 ### How Silo runs the plugin
 
-- Silo adds plugin tasks to **Scheduled Tasks** only when it starts, so **Download Theme Songs** appears after the next restart. Theme Songs does not need it: it starts its own runs. Silo's task finishes after 10 seconds while the run continues, so the task's run time is wrong; the Theme Songs page shows progress and the result.
-- Saving the plugin's settings restarts it and stops a run in progress. The next run starts shortly after.
-- **Check Connection** on the settings page tests the API key, the libraries and whether Silo can write to them, on Silo versions that support plugin settings checks.
+- Silo adds plugin tasks to **Scheduled Tasks** only when it starts, so **Download Theme Songs** appears after the next restart. Silo runs it only when Silo starts, until you add a trigger. Silo's task finishes after 10 seconds while the run continues, so the task's run time is wrong; the Theme Songs page shows progress and the result.
+- Saving the plugin's settings stops it, along with a run in progress and its daily timer. Silo starts the plugin again for the next library scan, visit to the Theme Songs page or task run, and a run with the new settings starts shortly after. Until then nothing runs.
+- For a run every day, open **Download Theme Songs** in **Administration → Scheduled Tasks**, choose **Edit Schedule** and **Add Trigger**, set the trigger to **Daily** and save.
+- **Check Connection** on the settings page tests the API key, the libraries and whether Silo can write to them, on Silo versions that support plugin settings checks. On other versions it says connection checks are not supported for this plugin. That is not an error.
 - Silo writes plugin logs to its container output, such as `docker logs silo`, not to its Logs page. Each run logs its start, its result, each download and one line per kind of problem. Set `SILO_THEME_LOG_LEVEL=warn` on the Silo container to log only problems.
 
 ## Build

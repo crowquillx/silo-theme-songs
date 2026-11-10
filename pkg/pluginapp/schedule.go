@@ -19,7 +19,10 @@ import (
 // Silo registers plugin tasks only when it starts and runs them only at
 // startup unless an administrator adds a trigger, so the plugin also runs
 // itself: a full run when its settings change or the last full run is a day
-// old, and a run for new items after Silo scans a library.
+// old, and a run for new items after Silo scans a library. These runs need
+// the plugin process. Silo stops it when the settings are saved and starts it
+// again for the next task, event or page request, so only a trigger on Silo's
+// task guarantees a daily run.
 
 const (
 	scheduleFile     = "schedule.json"
@@ -139,8 +142,40 @@ func recordRun(cfg Config, full bool, read map[string][]string, libs []string) e
 	return writeSchedule(cfg.StateDir, saved)
 }
 
+// activate turns on automatic runs. Silo's first task, event or page request
+// calls it, once per process. Being configured is not enough: for Check
+// Connection, Silo configures a temporary plugin process with unsaved settings
+// and stops it again, and that process must not start a run. Silo follows
+// every other start with one of those requests.
+func (s *Server) activate() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.active {
+		return
+	}
+	s.active = true
+	s.automateLocked()
+}
+
+// automateLocked starts the automate loop with the current settings in place
+// of the previous one, once the plugin is active and configured. The caller
+// holds s.mu.
+func (s *Server) automateLocked() {
+	if s.stopAuto != nil {
+		s.stopAuto()
+		s.stopAuto = nil
+	}
+	if !s.auto || !s.active || s.general == nil {
+		return
+	}
+	ctx, cancel := context.WithCancel(s.jobCtx)
+	s.stopAuto = cancel
+	s.loops++
+	go s.automate(ctx, s.cfg)
+}
+
 // automate checks hourly whether a full run is due, starting shortly after
-// the plugin is configured. It stops when ctx ends.
+// the plugin is active and configured. It stops when ctx ends.
 func (s *Server) automate(ctx context.Context, cfg Config) {
 	wait := s.startDelay
 	for {
@@ -165,6 +200,7 @@ func (s *Server) automate(ctx context.Context, cfg Config) {
 // scanned library folder, including the scans the plugin requests itself, so
 // events only note the library; a run follows once scans settle.
 func (s *Server) HandleEvent(_ context.Context, req *pluginv1.HandleEventRequest) (*pluginv1.HandleEventResponse, error) {
+	s.activate()
 	if req.GetEventName() == "scan_complete" {
 		if id := eventLibrary(req.GetPayload()); id != "" {
 			s.log.Debug("library scan finished", "library", id)
