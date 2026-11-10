@@ -154,6 +154,20 @@ func video(path string) bool {
 	}
 	return false
 }
+
+// UnknownSymlinkError reports a symlink beneath a media owner that is not
+// one of the item's catalog files. Resolve never follows it. The caller may
+// read the item's files again: a media server that adds symlinks, such as
+// Shoko's VFS, can create one after the inventory was read.
+type UnknownSymlinkError struct {
+	// Rel is the symlink's path relative to the owner folder.
+	Rel string
+}
+
+func (e *UnknownSymlinkError) Error() string {
+	return "symlink found beneath media owner: " + e.Rel
+}
+
 func (p Policy) Resolve(inv siloapi.Inventory, item siloapi.Item, season *siloapi.Season) ([]Destination, error) {
 	if e := p.Validate(); e != nil {
 		return nil, e
@@ -295,7 +309,7 @@ func (p Policy) Resolve(inv siloapi.Inventory, item siloapi.Item, season *siloap
 					return nil
 				}
 				rel, _ := filepath.Rel(local, path)
-				return fmt.Errorf("symlink found beneath media owner: %s", rel)
+				return &UnknownSymlinkError{Rel: rel}
 			}
 			if d.IsDir() {
 				return nil

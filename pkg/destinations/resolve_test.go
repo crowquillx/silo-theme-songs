@@ -1,6 +1,7 @@
 package destinations
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -206,8 +207,9 @@ func TestSymlinkedCatalogMediaIsAllowed(t *testing.T) {
 	if e := os.Symlink(filepath.Join(store, "a.mkv"), extra); e != nil {
 		t.Fatal(e)
 	}
-	if _, e := p.Resolve(inv, item, &s); e == nil {
-		t.Fatal("accepted an unknown symlink")
+	var link *UnknownSymlinkError
+	if _, e := p.Resolve(inv, item, &s); !errors.As(e, &link) || link.Rel != filepath.Join("Season 02", "notes.txt") || e.Error() != "symlink found beneath media owner: Season 02/notes.txt" {
+		t.Fatalf("unknown symlink: %v", e)
 	}
 	os.Remove(extra)
 	if e := os.Symlink(store, filepath.Join(season, "theme-music")); e != nil {

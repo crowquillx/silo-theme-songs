@@ -600,6 +600,7 @@ func (s *Server) Execute(ctx context.Context, mode string, only map[string][]str
 			report.State = "prerequisite_failed"
 		}
 	}
+	s.warnUnknownLibraries(cfg, libs, &report)
 	if len(selected) == 0 {
 		report.State = "prerequisite_failed"
 		report.Errors = append(report.Errors, "No movie or series libraries are selected. Choose libraries on the Theme Songs page or in the plugin's settings.")
@@ -720,6 +721,38 @@ func (s *Server) Execute(ctx context.Context, mode string, only map[string][]str
 	return
 }
 
+// warnUnknownLibraries warns about library IDs in the AnimeThemes and skip
+// settings that match none of Silo's libraries, such as a library that was
+// deleted and added again under a new ID. Unknown library_ids already stop
+// the run above. The settings still apply as written: AnimeThemes does not
+// fall back to every series library.
+func (s *Server) warnUnknownLibraries(cfg Config, libs []siloapi.Library, report *Report) {
+	exists := func(id string) bool {
+		return slices.ContainsFunc(libs, func(l siloapi.Library) bool { return l.ID == id })
+	}
+	for _, id := range cfg.SkipLibraryIDs {
+		if !exists(id) {
+			s.log.Warn("skipped library does not exist", "library", id)
+		}
+	}
+	if len(cfg.AnimeLibraryIDs) == 0 {
+		return
+	}
+	found := false
+	for _, id := range cfg.AnimeLibraryIDs {
+		if exists(id) {
+			found = true
+			continue
+		}
+		s.log.Warn("AnimeThemes library does not exist", "library", id)
+		report.notice("AnimeThemes libraries lists library " + id + ", which does not exist in Silo.")
+	}
+	if !found && cfg.animeEnabled() {
+		s.log.Warn("no AnimeThemes library exists, so AnimeThemes will not run", "anime_library_ids", cfg.AnimeLibraryIDs)
+		report.notice("None of the AnimeThemes libraries exist in Silo, so AnimeThemes will not run. Correct the AnimeThemes libraries setting, or clear it to check every series library.")
+	}
+}
+
 // writable describes why Silo cannot write to a library's folders, or
 // returns "" when it can.
 func writable(cfg Config, lib siloapi.Library) string {
@@ -811,6 +844,25 @@ func (s *Server) processTarget(r *run, src *source, inv siloapi.Inventory, item 
 	row := Row{Item: item.Title, ItemID: item.ID, Season: sn}
 	resolve := func() ([]destinations.Destination, bool) {
 		dests, err := r.cfg.Policy.Resolve(inv, item, target.Season)
+		var link *destinations.UnknownSymlinkError
+		if errors.As(err, &link) {
+			// Shoko's VFS and similar tools add episode symlinks while a
+			// long run is under way. Read the item's files again and retry
+			// once; a symlink Silo still does not list waits for the next
+			// run. Resolve never follows an unknown symlink either way.
+			if fresh, season, e := rereadItem(r, inv, item, target.Season); e != nil {
+				s.log.Warn("cannot read item files again", "item", item.Title, "error", e)
+			} else {
+				dests, err = r.cfg.Policy.Resolve(fresh, item, season)
+			}
+			if errors.As(err, &link) {
+				s.log.Warn("unknown symlink; trying again next run", "item", item.Title, "season", sn, "symlink", link.Rel)
+				row.Action = "deferred"
+				row.Reason = err.Error() + "; Silo does not list it yet, so the next run tries again"
+				report.add(row)
+				return nil, false
+			}
+		}
 		if err != nil {
 			row.Action = "refused"
 			row.Reason = err.Error()
@@ -960,6 +1012,42 @@ func (s *Server) processTarget(r *run, src *source, inv siloapi.Inventory, item 
 			report.add(out)
 		}
 	}
+}
+
+// rereadItem reads an item's files from Silo again and returns the library
+// inventory with that item's files replaced, so files of other items in the
+// same folders still count. It also returns the item's season with the same
+// number from the new read.
+func rereadItem(r *run, inv siloapi.Inventory, item siloapi.Item, season *siloapi.Season) (siloapi.Inventory, *siloapi.Season, error) {
+	fresh, err := r.api.ItemInventory(r.ctx, inv.Library, item.ID)
+	if err != nil {
+		return inv, nil, err
+	}
+	out := inv
+	out.Files = slices.DeleteFunc(slices.Clone(inv.Files), func(f siloapi.Membership) bool { return f.ItemID == item.ID })
+	out.Files = append(out.Files, fresh.Files...)
+	out.Seasons, out.Refusals, out.Unmatched = maps.Clone(inv.Seasons), maps.Clone(inv.Refusals), maps.Clone(inv.Unmatched)
+	if out.Seasons == nil {
+		out.Seasons = map[string][]siloapi.Season{}
+	}
+	if out.Refusals == nil {
+		out.Refusals = map[string]string{}
+	}
+	if out.Unmatched == nil {
+		out.Unmatched = map[string][]siloapi.File{}
+	}
+	out.Seasons[item.ID] = fresh.Seasons[item.ID]
+	out.Refusals[item.ID] = fresh.Refusals[item.ID]
+	out.Unmatched[item.ID] = fresh.Unmatched[item.ID]
+	if season == nil {
+		return out, nil, nil
+	}
+	for _, v := range fresh.Seasons[item.ID] {
+		if v.Number == season.Number {
+			return out, &v, nil
+		}
+	}
+	return inv, nil, errors.New("season moved or was removed")
 }
 
 // maintain rechecks a library's published themes: their files, their
