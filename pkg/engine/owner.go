@@ -25,7 +25,17 @@ type marker struct {
 	OwnerID  string `json:"owner_id"`
 }
 
+// lockOwner opens an owner folder and takes its lock. Its errors name the
+// folder, since a run checks many and the bare errors do not say which.
 func lockOwner(ctx context.Context, localPath string) (*os.Root, func(), error) {
+	root, unlock, err := lockOwnerAt(ctx, localPath)
+	if err != nil {
+		return nil, nil, fmt.Errorf("owner lock in %q: %w", localPath, err)
+	}
+	return root, unlock, nil
+}
+
+func lockOwnerAt(ctx context.Context, localPath string) (*os.Root, func(), error) {
 	if err := destinationsCheck(localPath); err != nil {
 		return nil, nil, err
 	}
@@ -103,7 +113,19 @@ func readMarker(root *os.Root) (marker, bool, error) {
 	return m, true, nil
 }
 
+// markerErr names the owner folder in an owner marker error.
+func markerErr(root *os.Root, err error) error {
+	if err == nil {
+		return nil
+	}
+	return fmt.Errorf("owner marker in %q: %w", root.Name(), err)
+}
+
 func checkMarker(root *os.Root, provider, ownerID string) error {
+	return markerErr(root, checkMarkerAt(root, provider, ownerID))
+}
+
+func checkMarkerAt(root *os.Root, provider, ownerID string) error {
 	m, exists, err := readMarker(root)
 	if err != nil {
 		return err
@@ -115,6 +137,10 @@ func checkMarker(root *os.Root, provider, ownerID string) error {
 }
 
 func requireMarker(root *os.Root, provider, ownerID string) error {
+	return markerErr(root, requireMarkerAt(root, provider, ownerID))
+}
+
+func requireMarkerAt(root *os.Root, provider, ownerID string) error {
 	m, exists, err := readMarker(root)
 	if err != nil {
 		return err
@@ -126,7 +152,11 @@ func requireMarker(root *os.Root, provider, ownerID string) error {
 }
 
 func writeMarker(root *os.Root, provider, ownerID string) error {
-	if err := checkMarker(root, provider, ownerID); err != nil {
+	return markerErr(root, writeMarkerAt(root, provider, ownerID))
+}
+
+func writeMarkerAt(root *os.Root, provider, ownerID string) error {
+	if err := checkMarkerAt(root, provider, ownerID); err != nil {
 		return err
 	}
 	if _, exists, _ := readMarker(root); exists {

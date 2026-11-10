@@ -464,3 +464,35 @@ func TestOversizeStateRejectedBeforeDecode(t *testing.T) {
 		t.Fatal("oversize state accepted")
 	}
 }
+
+// A run checks many owner folders, so owner errors must say which one failed.
+func TestOwnerErrorsNameTheFolder(t *testing.T) {
+	d, stage, stateDir := fixture(t)
+	lock := filepath.Join(d.LocalPath, ownerLock)
+	if err := os.WriteFile(lock, nil, 0); err != nil {
+		t.Fatal(err)
+	}
+	if f, err := os.OpenFile(lock, os.O_RDWR, 0); err == nil {
+		f.Close()
+		t.Skip("running with permission to open a mode 000 file")
+	}
+	e, err := Open(stateDir, "general")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer e.Close()
+	_, err = e.Publish(context.Background(), d, "tmdb:123", "general-themerrdb-123-title.mp3", stage, func(context.Context) error { return nil })
+	if !errors.Is(err, os.ErrPermission) || !strings.Contains(err.Error(), `owner lock in "`+d.LocalPath+`"`) {
+		t.Fatalf("lock error does not name the folder: %v", err)
+	}
+	if err := os.Remove(lock); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(d.LocalPath, ownerMarker), []byte("{}"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	_, err = e.Publish(context.Background(), d, "tmdb:123", "general-themerrdb-123-title.mp3", stage, func(context.Context) error { return nil })
+	if err == nil || err.Error() != `owner marker in "`+d.LocalPath+`": invalid owner marker` {
+		t.Fatalf("marker error does not name the folder: %v", err)
+	}
+}

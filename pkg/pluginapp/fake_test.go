@@ -39,6 +39,8 @@ type fakeSilo struct {
 	// scanDiscovers makes a scan request list the theme at once.
 	scanDiscovers bool
 	apiCalls      atomic.Int32
+	// served, if set, runs after each request with the lock held.
+	served func(path string)
 }
 
 type fakeItem struct {
@@ -125,6 +127,9 @@ func (f *fakeSilo) serve(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	path := strings.TrimPrefix(r.URL.Path, "/api/v2")
 	send := func(v any) { json.NewEncoder(w).Encode(v) }
+	if f.served != nil {
+		defer f.served(path)
+	}
 	switch {
 	case r.Method == http.MethodPost && path == "/scan":
 		var body map[string]string
@@ -159,7 +164,11 @@ func (f *fakeSilo) serve(w http.ResponseWriter, r *http.Request) {
 		send(map[string]any{"items": rows, "page": map[string]any{"has_more": false}})
 	case strings.HasPrefix(path, "/catalog/items/") && strings.HasSuffix(path, "/versions"):
 		item := f.item(strings.TrimSuffix(strings.TrimPrefix(path, "/catalog/items/"), "/versions"))
-		send(map[string]any{"items": []any{map[string]string{"file_id": item.videos[0].id}}})
+		versions := []any{}
+		for _, v := range item.videos {
+			versions = append(versions, map[string]string{"file_id": v.id})
+		}
+		send(map[string]any{"items": versions})
 	case strings.HasPrefix(path, "/catalog/items/"):
 		id := strings.TrimPrefix(path, "/catalog/items/")
 		v := map[string]any{"content_id": id}

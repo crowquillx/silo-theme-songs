@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"os"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -626,5 +627,118 @@ func TestSeasonTargetsCarryFilePaths(t *testing.T) {
 	targets := seasonTargets(inv, item)
 	if len(targets) != 2 || len(targets[1].Paths) != 1 || targets[1].Paths[0] != "/vfs/Show/Season 02/b.mkv" {
 		t.Fatalf("targets = %#v", targets)
+	}
+}
+
+// Settings that name deleted libraries warn once per run, and AnimeThemes
+// does not fall back to every series library.
+func TestUnknownAnimeLibrariesWarn(t *testing.T) {
+	ctx := context.Background()
+	silo := newFakeSilo(t, "series")
+	silo.addSeries("series:anime", "Anime Show", "1")
+	stage := stagedAudio(t)
+	general := &fakeProvider{staged: stage}
+	anime := &fakeProvider{staged: stage, claims: map[string]bool{"series:anime": true}}
+	s, cfg := newTestServer(t, silo, general, anime)
+	var logs strings.Builder
+	s.log = hclog.New(&hclog.LoggerOptions{Output: &logs, JSONFormat: true, Level: hclog.Info})
+	cfg.AnimeLibraryIDs = []string{"1", "2"}
+	cfg.SkipLibraryIDs = []string{"gone"}
+	if e := s.ConfigureLocal(ctx, cfg); e != nil {
+		t.Fatal(e)
+	}
+	r := s.Execute(ctx, "sync", nil)
+	if anime.calls.Load() != 0 || general.calls.Load() != 1 {
+		t.Fatalf("AnimeThemes ran for libraries that do not exist: %+v", r)
+	}
+	notices := strings.Join(r.Notices, "\n")
+	for _, want := range []string{"library 1, which does not exist", "library 2, which does not exist", "AnimeThemes will not run"} {
+		if !strings.Contains(notices, want) {
+			t.Fatalf("notices %q lack %q", notices, want)
+		}
+	}
+	count := func(message string) int {
+		n := 0
+		for _, line := range strings.Split(strings.TrimSpace(logs.String()), "\n") {
+			var entry map[string]any
+			if json.Unmarshal([]byte(line), &entry) == nil && entry["@message"] == message && entry["@level"] == "warn" {
+				n++
+			}
+		}
+		return n
+	}
+	if count("AnimeThemes library does not exist") != 2 || count("no AnimeThemes library exists, so AnimeThemes will not run") != 1 || count("skipped library does not exist") != 1 {
+		t.Fatalf("warnings: %s", logs.String())
+	}
+	// One known anime library is enough to run AnimeThemes; the unknown one
+	// still warns.
+	silo.addSeries("series:anime2", "Anime Two", "3")
+	anime.claims["series:anime2"] = true
+	cfg.AnimeLibraryIDs, cfg.SkipLibraryIDs = []string{"lib", "9"}, nil
+	if e := s.ConfigureLocal(ctx, cfg); e != nil {
+		t.Fatal(e)
+	}
+	r = s.Execute(ctx, "sync", nil)
+	notices = strings.Join(r.Notices, "\n")
+	if anime.calls.Load() != 1 || !strings.Contains(notices, "library 9, which does not exist") || strings.Contains(notices, "will not run") {
+		t.Fatalf("known anime library: calls=%d %+v", anime.calls.Load(), r)
+	}
+}
+
+// A symlink that appears after the library was read, such as a new Shoko VFS
+// episode, is read again instead of refusing the item.
+func TestSymlinkAddedDuringRunIsReadAgain(t *testing.T) {
+	ctx := context.Background()
+	silo := newFakeSilo(t, "movies")
+	item := silo.addMovie("movie:fixture", "Fixture")
+	target := filepath.Join(t.TempDir(), "part2.mkv")
+	if err := os.WriteFile(target, []byte("video"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(item.dir, "movie.part2.mkv")
+	versions := 0
+	silo.served = func(path string) {
+		if path != "/catalog/items/movie:fixture/versions" {
+			return
+		}
+		if versions++; versions == 1 {
+			// Silo lists the new file only after the library was read.
+			if err := os.Symlink(target, link); err != nil {
+				t.Error(err)
+			}
+			item.videos = append(item.videos, fakeVideo{id: "movie:fixture-2", path: link, season: -1})
+		}
+	}
+	p := &fakeProvider{staged: stagedAudio(t)}
+	s, cfg := newTestServer(t, silo, p, nil)
+	if e := s.ConfigureLocal(ctx, cfg); e != nil {
+		t.Fatal(e)
+	}
+	r := s.Execute(ctx, "sync", nil)
+	if r.Downloaded != 1 || r.State != "complete" || hasAction(r.Rows, "refused") || hasAction(r.Rows, "deferred") {
+		t.Fatalf("new symlink not read again: %+v", r)
+	}
+}
+
+// A symlink Silo still does not list after a second read waits for the next
+// run, and nothing is written beside it.
+func TestUnknownSymlinkIsDeferred(t *testing.T) {
+	ctx := context.Background()
+	silo := newFakeSilo(t, "movies")
+	item := silo.addMovie("movie:fixture", "Fixture")
+	if err := os.Symlink(t.TempDir(), filepath.Join(item.dir, "stray")); err != nil {
+		t.Fatal(err)
+	}
+	p := &fakeProvider{staged: stagedAudio(t)}
+	s, cfg := newTestServer(t, silo, p, nil)
+	if e := s.ConfigureLocal(ctx, cfg); e != nil {
+		t.Fatal(e)
+	}
+	r := s.Execute(ctx, "sync", nil)
+	if r.Downloaded != 0 || p.calls.Load() != 0 || len(r.Rows) != 1 || r.Rows[0].Action != "deferred" || !strings.Contains(r.Rows[0].Reason, "symlink found beneath media owner: stray") {
+		t.Fatalf("unknown symlink not deferred: %+v", r)
+	}
+	if _, err := os.Lstat(filepath.Join(item.dir, "theme-music")); !os.IsNotExist(err) {
+		t.Fatalf("wrote beside an unknown symlink: %v", err)
 	}
 }
