@@ -31,12 +31,16 @@ func TestAdapterCachedMappingAndSeasonSelection(t *testing.T) {
 	a := p.(*Adapter)
 	a.lastRefresh = time.Now()
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		id := r.URL.Query().Get("filter[resource][external_id]")
-		if id != "10206,10835" {
-			t.Errorf("unexpected AniDB filter %q", id)
+		var req struct {
+			Variables struct {
+				IDs []int `json:"ids"`
+			} `json:"variables"`
+		}
+		if r.Method != http.MethodPost || json.NewDecoder(r.Body).Decode(&req) != nil || fmt.Sprint(req.Variables.IDs) != "[10206 10835]" {
+			t.Errorf("unexpected AniDB lookup %s %v", r.Method, req.Variables.IDs)
 		}
 		w.Header().Set("Content-Type", "application/json")
-		w.Write([]byte(`{"anime":[{"id":1,"resources":[{"site":"AniDB","external_id":10206}],"animethemes":[{"id":5,"type":"OP","sequence":1,"slug":"op-one","animethemeentries":[{"id":6,"videos":[{"id":7,"overlap":"None","audio":{"id":7,"link":"https://a.animethemes.moe/op.ogg","filename":"op.ogg","size":100}}]}]}]},{"id":2,"resources":[{"site":"AniDB","external_id":10835}],"animethemes":[{"id":8,"type":"ED","sequence":1,"slug":"ed-one","animethemeentries":[{"id":9,"videos":[{"id":10,"overlap":"None","audio":{"id":11,"link":"https://a.animethemes.moe/ed.ogg","filename":"ed.ogg","size":100}}]}]}]}],"links":{"next":null}}`))
+		w.Write([]byte(`{"data":{"findAnimeByExternalSite":[{"id":1,"title":{"romaji":"one"},"resources":{"pageInfo":{"hasNextPage":false},"nodes":[{"site":"ANIDB","externalId":10206}]},"animethemes":[{"id":5,"type":"OP","sequence":1,"slug":"op-one","animethemeentries":[{"id":6,"version":1,"nsfw":false,"spoiler":false,"videos":{"pageInfo":{"hasNextPage":false},"nodes":[{"id":7,"overlap":"NONE","nc":false,"audio":{"id":7,"link":"https://a.animethemes.moe/op.ogg","basename":"op.ogg","filename":"op","mimetype":"audio/ogg","size":100}}]}}]}]},{"id":2,"title":{"romaji":"two"},"resources":{"pageInfo":{"hasNextPage":false},"nodes":[{"site":"ANIDB","externalId":10835}]},"animethemes":[{"id":8,"type":"ED","sequence":1,"slug":"ed-one","animethemeentries":[{"id":9,"version":1,"nsfw":false,"spoiler":false,"videos":{"pageInfo":{"hasNextPage":false},"nodes":[{"id":10,"overlap":"NONE","nc":false,"audio":{"id":11,"link":"https://a.animethemes.moe/ed.ogg","basename":"ed.ogg","filename":"ed","mimetype":"audio/ogg","size":100}}]}}]}]}]}}`))
 	}))
 	defer srv.Close()
 	a.themes.BaseURL = srv.URL
