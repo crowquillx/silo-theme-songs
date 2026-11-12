@@ -14,6 +14,8 @@ That's all. Theme Songs uses every movie and series library and runs on its own:
 
 Silo writes themes into your media folders, so they must be writable. Silo's Docker Compose file mounts media read-only. Remove `:ro` from the media volume and recreate the container. The Theme Songs page and every run say which library is read-only. Like Jellyfin's theme plugins, Theme Songs leaves the permissions of new themes and `theme-music` folders to Silo's umask, so with the usual umask of `022` other programs that read your media can read them.
 
+Anime lookups use the AnimeThemes GraphQL API at `graphql.animethemes.moe`, and anime audio comes from `a.animethemes.moe`.
+
 The first theme that comes from YouTube installs yt-dlp and Deno in the plugin's state directory. This uses about 190 MB and needs access to GitHub. The plugin checks the yt-dlp release signature and the Deno checksum, and it checks for a new yt-dlp release once a day.
 
 ### Upgrading from 0.1 or the AnimeThemes plugin
@@ -21,6 +23,10 @@ The first theme that comes from YouTube installs yt-dlp and Deno in the plugin's
 AnimeThemes was a separate plugin before 0.2.0. Install Theme Songs 0.2.0 or later, then uninstall the AnimeThemes plugin. Until you do, Theme Songs leaves anime libraries to it. The first run afterwards copies the AnimeThemes plugin's state from its default state directory, so its themes stay managed. Settings from the AnimeThemes plugin are not copied: re-enter any manual mappings or overrides under **AnimeThemes settings (JSON)**.
 
 The Preview, Reconcile and Autoscan steps are gone. Every run now checks the themes it downloaded, and Silo scans each new theme when the plugin asks. You can delete the plugin's Autoscan source. Settings saved by 0.1 keep working: **Preview only** still applies until you save the settings form, which then shows **Dry run** instead, and **Anime-managed library IDs** became **AnimeThemes libraries**.
+
+### Upgrading to 0.2.4
+
+Versions before 0.2.4 use the AnimeThemes JSON:API at `api.animethemes.moe`. It has answered every request with HTTP 503 since 2026-11-10, so those versions download no anime themes. Each run reports every anime season as unavailable. The status page says "AnimeThemes rate limit exceeds request budget" or "AnimeThemes HTTP 503". 0.2.4 uses the GraphQL API instead. Nothing needs to be cleared: failed lookups are not saved, and the next full run looks those seasons up again. A full run happens once a day, or right away when you choose **Download now** on the Theme Songs page or run **Download Theme Songs** in **Scheduled Tasks**.
 
 ### Settings
 

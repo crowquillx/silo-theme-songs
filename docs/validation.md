@@ -70,3 +70,26 @@ On 2026-10-31 the plugin ran in Silo's `ghcr.io/silo-server/silo-server:aio` ima
 - With the AnimeThemes 0.1.13 plugin installed and enabled, Theme Songs showed its notice and left the anime series alone, opening its own AnimeThemes state only to see what it manages. After uninstalling it, the next run managed all five themes again.
 - `RuntimeHost.ListLibraries` reports music and other non-video libraries as `mixed`, so the page lists libraries through the API key instead.
 - The live run wrote themes as `0600`, readable only by Silo's user. Themes and `theme-music` folders now get modes 0666 and 0777 reduced by the umask, as Jellyfin's Theme Songs and AnimeThemes plugins write them; a unit test covers this.
+
+## AnimeThemes GraphQL in v0.2.4
+
+From 2026-11-10 19:22 UTC at the latest, `https://api.animethemes.moe` (the JSON:API) answered every request with HTTP 503 from nginx behind Cloudflare. It still did on 2026-11-12 03:29 UTC. Every Theme Songs run in that period downloaded 0 anime themes, and every anime season was reported as `source_unavailable`. The AnimeThemes website uses `https://graphql.animethemes.moe/`, and the API docs (animethemes-api-docs PR #140, 2026-11-08) moved to GraphQL, which they call experimental. The plugin now uses GraphQL only. A JSON:API fallback was not kept: the origin is down and appears deprecated, and each run would spend its retries and a 503 cooldown on it before reaching GraphQL.
+
+The client was written against the live schema from an introspection query on 2026-11-12:
+
+- `findAnimeByExternalSite(site: ANIDB, id: [Int!])` returns a plain list with no pagination. It refuses more than 100 IDs (`The id must not be greater than 100 characters.`), so batches stay at 100. A 100-ID batch returned 75 anime with complete nested data. The plugin still keeps only anime whose AniDB resource matches a requested ID.
+- Nested lists are `animethemes` and `animethemeentries`, both plain lists with `first` and `page`, and `videos`, a connection with `pageInfo` and an `after` cursor. Each is requested with `first: 1000`. A list that fills its page is completed with `findAnimeByExternalSite` for one ID with `page`, `animethemePagination(id:)` with `page`, or `animethemeentryPagination(where: {column: ID, operator: EQ, value:})` with `after`. All three follow-ups were checked live with `first: 1` against Death Note theme 2279 and Fushigi Yuugi entry 769, which has two videos. One batch may make at most 20 follow-up requests.
+- Values are upper case: `ANIDB`, `OP`/`ED`/`IN`, overlap `NONE`/`TRANS`/`OVER`. Selection already compared these without regard to case. Entry `version` is non-null and theme `sequence` is nullable. Audio `basename` keeps the extension and `filename` omits it, as in the JSON:API since 0.2.0.
+- A response with a GraphQL `errors` array, a null `data` or a null collection is refused and not cached, so a server-side failure is not stored as "no themes". HTTP 429 and 503, `Retry-After`, `X-RateLimit-Remaining`/`X-RateLimit-Reset` and the shared per-origin pacing are handled as before. The GraphQL origin sends `X-RateLimit-Limit: 90`, and the plugin's one request per second stays under it.
+- The schema follows Laravel Lighthouse conventions (`PaginatorInfo`, `HAS` where-conditions, the `Mixed` scalar), which suggests the same application and database serve it, so theme and audio IDs, and with them candidate IDs such as `animethemes-2279-1252`, are expected to match the JSON:API's. This was not checked against JSON:API output, since that API is down. Tanime had no AnimeThemes records to compare.
+
+Live checks on 2026-11-12 used the new client:
+
+- AniDB 23, 4563, 6662 and 9304 resolved to Cowboy Bebop, Death Note, Fairy Tail and JoJo no Kimyou na Bouken, with 2, 4, 28 and 3 candidates. Every candidate URL is on `a.animethemes.moe`, so the default `audio_hosts` is unchanged.
+- 100 random AniDB IDs from the AniBridge v3 mapping resolved in one request in 2.1 seconds: 34 IDs had anime and there were 88 candidates.
+- Through the adapter, Shoko-style file names with `[AniDB Anime=4563]` and `[AniDB Anime=6662]` produced 4 and 28 candidates without the mapping data. Preflight passed, and Fetch downloaded `DeathNote-ED1.ogg` (2,748,265 bytes, as the API reports) and converted it to a 1,675,850-byte MP3.
+- A ranged GET of `https://a.animethemes.moe/DeathNote-ED1.ogg` returned 206 with `audio/ogg`, and a full GET returned 200. HEAD returns 403 for any user agent, but the downloader only uses GET.
+
+Fixture tests cover the GraphQL request shape, exact AniDB matching, 100-ID batches, all three follow-up page kinds, the follow-up limit, cursor cycles, positive and negative cache TTLs, GraphQL errors and null data, and 429 and 503 retries.
+
+Failed lookups are only reported, never saved. The schedule file holds the known items and the time of the last full run, so seasons that failed under 0.2.3 are looked up again by the next full run: daily, on **Download now**, or when **Download Theme Songs** runs. Nothing needs to be cleared.
