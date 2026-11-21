@@ -93,3 +93,22 @@ Live checks on 2026-11-12 used the new client:
 Fixture tests cover the GraphQL request shape, exact AniDB matching, 100-ID batches, all three follow-up page kinds, the follow-up limit, cursor cycles, positive and negative cache TTLs, GraphQL errors and null data, and 429 and 503 retries.
 
 Failed lookups are only reported, never saved. The schedule file holds the known items and the time of the last full run, so seasons that failed under 0.2.3 are looked up again by the next full run: daily, on **Download now**, or when **Download Theme Songs** runs. Nothing needs to be cleared.
+
+## Theme volume and re-downloads in v0.3.0
+
+Every download is now leveled to **Theme volume**, −16 LUFS by default. FFmpeg's `loudnorm` filter measures the integrated loudness and true peak (EBU R128). The theme is then encoded once with a single `volume` gain, limited so the true peak stays at or below −1 dBTP. `loudnorm` itself is not used to change the audio: its dynamic mode compresses music whose peaks would pass the limit, and it resamples to 192 kHz. A theme that measures as silence keeps its level, and an MP3 already within 0.5 dB of the target is kept byte for byte. **Original** keeps the previous behavior, including byte-identical MP3 sources.
+
+yt-dlp now runs with `-x --audio-format best --audio-quality 0` instead of converting to 192 kbps MP3, so YouTube audio is encoded once instead of twice. With yt-dlp 2026.10.26 on 2026-11-21, a YouTube video produced one `theme.opus` file in an Ogg container and yt-dlp deleted the downloaded `theme.webm`. The downloader takes the one `theme.<audio extension>` file it finds and refuses several.
+
+Live checks on 2026-11-21 used the shared downloader with FFmpeg 9.0.2 and a −16 LUFS target:
+
+- YouTube video `jNQXAC9IVRw`, through yt-dlp 2026.10.26 and Deno, gave a 457,708-byte MP3 that measured 0.27 dB below −16 LUFS.
+- `https://a.animethemes.moe/DeathNote-ED1.ogg` gave a 1,675,850-byte MP3 that measured 0.25 dB below −16 LUFS.
+
+Fixture tests generate pink noise at quiet and loud levels as Ogg/Vorbis and MP3. Each comes out within 1 LU of −16 LUFS. Other tests cover gain limits from the true peak, silence, unreadable measurements, FFmpeg becoming required for MP3 sources when leveling is on, and yt-dlp output detection.
+
+**Re-download themes that don't match these settings** is off by default. Each record now stores the audio processing it received (`audio`, such as `loudness:-16`). Records from before this version have none, which means the source's own level. With the switch on, a run replaces a discovered theme whose `audio` differs from the settings. It also replaces a general theme whose source changed, which earlier versions reported as `selection_changed`, and removes AnimeThemes themes that are no longer selected. Replacements carry the level in their file name, such as `-lufs16.mp3`, so Silo sees a new file rather than a changed one. A folder's old themes are removed only after every selected theme is saved there, so a failed download keeps the old one. A folder with no selected theme at all keeps its themes. The engine checks the owner marker and the file's checksum before deleting it, and a changed file becomes protected instead. A removal is recorded as `removing` before the file goes, and recovery finishes an interrupted one. After a removal the plugin asks Silo to scan the folder's `theme-music` directory.
+
+Fixture runs against the fake Silo cover replacing a theme after a volume change, with dry run first, replacing a changed source, keeping the old theme when the download fails, and removing a deselected anime ending while keeping a season's themes when nothing is selected. Engine tests cover removal, a changed file and an interrupted removal.
+
+Not yet checked against a live Silo server: whether Silo drops the old theme when it scans the `theme-music` folder after a removal. Until it does, Silo may list a theme whose file is gone.
