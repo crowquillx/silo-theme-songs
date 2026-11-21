@@ -89,7 +89,7 @@ func actionPriority(action string) int {
 	switch action {
 	case "download_failed", "prerequisite_failed", "needs_review", "selection_changed", "operator_review", "stale", "protected", "destination_unconfirmed", "pending":
 		return 0
-	case "downloaded", "would_download", "deferred":
+	case "downloaded", "would_download", "deferred", "removed", "would_remove":
 		return 1
 	case "refused":
 		return 2
@@ -912,10 +912,13 @@ func (s *Server) processTarget(r *run, src *source, inv siloapi.Inventory, item 
 			return
 		}
 	}
-	if src.anime {
+	profile, redownload := r.cfg.audioProfile(), r.cfg.redownload()
+	if src.anime && !redownload {
 		reportObsolete(report, store.Records(), dests, candidates)
 	}
 	if len(candidates) == 0 {
+		// Nothing selected can also mean a source lacks data for now, so
+		// managed themes stay even with redownload on.
 		row.Action = "no_theme"
 		report.add(row)
 		return
@@ -936,19 +939,33 @@ func (s *Server) processTarget(r *run, src *source, inv siloapi.Inventory, item 
 				continue
 			}
 			stableID := sourceID(candidate)
-			if !src.anime && changedSelection(store.Records(), dest, stableID) {
-				out.Action = "selection_changed"
-				out.Reason = "existing managed theme preserved; review the changed source selection"
-				report.add(out)
-				continue
+			records := store.Records()
+			// replaces says why a download replaces a managed theme.
+			replaces := ""
+			if !src.anime && changedSelection(records, dest, stableID) {
+				if !redownload {
+					out.Action = "selection_changed"
+					out.Reason = "existing managed theme preserved; review the changed source selection"
+					report.add(out)
+					continue
+				}
+				replaces = "the theme source changed"
 			}
-			if reason := existingAudio(dest, store.Records()); reason != "" {
+			if reason := existingAudio(dest, records); reason != "" {
 				out.Action = "preserved"
 				out.Reason = reason
 				report.add(out)
 				continue
 			}
-			if old, ok := existing(store.Records(), dest, stableID); ok {
+			old, ok := existing(records, dest, stableID)
+			if redownload {
+				if cur, found := matching(records, dest, stableID, profile); found {
+					old, ok = cur, true
+				} else if ok && old.Status == engine.Discovered {
+					ok, replaces = false, "the volume does not match Theme volume"
+				}
+			}
+			if ok {
 				out.Action = string(old.Status)
 				if old.Status == engine.Published {
 					out.Action = "destination_unconfirmed"
@@ -966,6 +983,9 @@ func (s *Server) processTarget(r *run, src *source, inv siloapi.Inventory, item 
 					report.add(out)
 					continue
 				}
+			}
+			if replaces != "" {
+				out.Reason = "replaces the current theme: " + replaces
 			}
 			if r.preview {
 				out.Action = "would_download"
@@ -999,7 +1019,7 @@ func (s *Server) processTarget(r *run, src *source, inv siloapi.Inventory, item 
 			} else {
 				output := candidate
 				output.Extension = staged.Format
-				published, err = store.Publish(ctx, dest, stableID, filename(src.name, output), staged.Path, func(ctx context.Context) error { return revalidate(ctx, r.api, r.cfg, dest) })
+				published, err = store.PublishAudio(ctx, dest, stableID, profile, filename(src.name, output, profileTag(profile)), staged.Path, func(ctx context.Context) error { return revalidate(ctx, r.api, r.cfg, dest) })
 			}
 			if closeErr := staged.Close(); closeErr != nil {
 				report.Errors = append(report.Errors, closeErr.Error())
@@ -1014,11 +1034,61 @@ func (s *Server) processTarget(r *run, src *source, inv siloapi.Inventory, item 
 			s.log.Info("theme downloaded", "item", item.Title, "season", sn, "destination", dest.ServerPath, "source", candidate.Provenance)
 			out.Action = "downloaded"
 			report.Downloaded++
-			if !s.confirm(r, src, published) {
+			if !s.confirm(r, src, published) && replaces == "" {
 				out.Reason = "Silo will list it after it scans the folder"
 			}
 			report.add(out)
 		}
+		if redownload {
+			// After this folder's downloads, so its old themes go only
+			// once their replacements are saved.
+			s.removeMismatched(r, src, item, sn, dest, candidates, profile)
+		}
+	}
+}
+
+// removeMismatched removes a folder's managed themes that the settings no
+// longer select, or that were saved with other audio settings. It waits until
+// every selected theme is saved there, so the folder is never left without
+// one. Protected, stale and unconfirmed themes are left alone.
+func (s *Server) removeMismatched(r *run, src *source, item siloapi.Item, season int, dest destinations.Destination, candidates []Candidate, profile string) {
+	records := src.engine.Records()
+	wanted := map[string]bool{}
+	for _, c := range candidates {
+		if c.ID == "" {
+			return
+		}
+		id := sourceID(c)
+		wanted[id] = true
+		cur, ok := matching(records, dest, id, profile)
+		if !r.preview && (!ok || cur.Status != engine.Published && cur.Status != engine.Discovered) {
+			return
+		}
+	}
+	removed := false
+	for _, rec := range records {
+		if rec.LibraryID != dest.LibraryID || rec.LocalPath != dest.LocalPath || wanted[rec.SourceID] && rec.Audio == profile {
+			continue
+		}
+		if rec.Status != engine.Published && rec.Status != engine.Discovered {
+			continue
+		}
+		row := Row{Item: item.Title, ItemID: item.ID, Season: season, Destination: rec.ServerPath, Source: rec.SourceID, Theme: rec.Filename, Action: "would_remove", Reason: "does not match the settings; removed once its replacement is saved"}
+		if !r.preview {
+			if err := src.engine.Remove(r.ctx, rec); err != nil {
+				s.log.Warn("removal refused", "item", item.Title, "season", season, "error", err)
+				row.Action, row.Reason = "refused", "cannot remove a theme that does not match the settings: "+err.Error()
+			} else {
+				s.log.Info("theme removed", "item", item.Title, "season", season, "destination", rec.ServerPath, "theme", rec.Filename)
+				row.Action, row.Reason = "removed", "did not match the settings"
+				removed = true
+			}
+		}
+		r.report.add(row)
+	}
+	if removed {
+		// Silo drops the old theme when it scans the folder.
+		s.scanPath(r, dest.LibraryID, filepath.Join(dest.ServerPath, "theme-music"))
 	}
 }
 
@@ -1140,10 +1210,15 @@ func (s *Server) discovered(r *run, src *source, rec engine.Record) (bool, error
 // requestScan asks Silo to scan a published theme file. It reports whether
 // Silo accepted the request.
 func (s *Server) requestScan(r *run, rec engine.Record) bool {
+	return s.scanPath(r, rec.LibraryID, filepath.Join(rec.ServerPath, "theme-music", rec.Filename))
+}
+
+// scanPath asks Silo to scan one file or folder of a library.
+func (s *Server) scanPath(r *run, library, path string) bool {
 	if r.scanUnavailable {
 		return false
 	}
-	err := r.api.RequestScan(r.ctx, rec.LibraryID, filepath.Join(rec.ServerPath, "theme-music", rec.Filename))
+	err := r.api.RequestScan(r.ctx, library, path)
 	switch {
 	case err == nil:
 		return true
@@ -1206,7 +1281,17 @@ func (s *Server) logResult(r Report) {
 
 func existing(records []engine.Record, d destinations.Destination, id string) (engine.Record, bool) {
 	for _, r := range records {
-		if r.LocalPath == d.LocalPath && r.SourceID == id && r.Status != engine.Failed {
+		if r.LocalPath == d.LocalPath && r.SourceID == id && r.Status != engine.Failed && r.Status != engine.Removing {
+			return r, true
+		}
+	}
+	return engine.Record{}, false
+}
+
+// matching is existing for a theme saved with the given audio settings.
+func matching(records []engine.Record, d destinations.Destination, id, audio string) (engine.Record, bool) {
+	for _, r := range records {
+		if r.LocalPath == d.LocalPath && r.SourceID == id && r.Audio == audio && r.Status != engine.Failed && r.Status != engine.Removing {
 			return r, true
 		}
 	}
@@ -1214,7 +1299,7 @@ func existing(records []engine.Record, d destinations.Destination, id string) (e
 }
 func blocked(records []engine.Record, d destinations.Destination) bool {
 	for _, r := range records {
-		if r.LocalPath == d.LocalPath && (r.Status == engine.Published || r.Status == engine.Pending || r.Status == engine.Stale || r.Status == engine.Protected) {
+		if r.LocalPath == d.LocalPath && (r.Status == engine.Published || r.Status == engine.Pending || r.Status == engine.Stale || r.Status == engine.Protected || r.Status == engine.Removing) {
 			return true
 		}
 	}
@@ -1223,7 +1308,7 @@ func blocked(records []engine.Record, d destinations.Destination) bool {
 
 func changedSelection(records []engine.Record, d destinations.Destination, id string) bool {
 	for _, r := range records {
-		if r.LibraryID == d.LibraryID && r.LocalPath == d.LocalPath && r.Status != engine.Failed && r.SourceID != id {
+		if r.LibraryID == d.LibraryID && r.LocalPath == d.LocalPath && r.Status != engine.Failed && r.Status != engine.Removing && r.SourceID != id {
 			return true
 		}
 	}
@@ -1239,7 +1324,7 @@ func reportObsolete(report *Report, records []engine.Record, dests []destination
 	}
 	for _, d := range dests {
 		for _, r := range records {
-			if r.LibraryID != d.LibraryID || r.LocalPath != d.LocalPath || r.Status == engine.Failed || selected[r.SourceID] {
+			if r.LibraryID != d.LibraryID || r.LocalPath != d.LocalPath || r.Status == engine.Failed || r.Status == engine.Removing || selected[r.SourceID] {
 				continue
 			}
 			if slices.ContainsFunc(report.Rows, func(row Row) bool {
@@ -1310,7 +1395,8 @@ func limitRunes(s string, max int) string {
 	return string(r)
 }
 
-func filename(name string, c Candidate) string {
+// filename names a published theme. tag marks its audio settings.
+func filename(name string, c Candidate, tag string) string {
 	slug := strings.Trim(slugRE.ReplaceAllString(strings.ToLower(c.Title), "-"), "-")
 	if len(slug) > 45 {
 		slug = slug[:45]
@@ -1318,7 +1404,7 @@ func filename(name string, c Candidate) string {
 	if slug == "" {
 		slug = "theme"
 	}
-	return fmt.Sprintf("%s-%s-%s.%s", name, filenameID(c.ID), slug, strings.ToLower(strings.TrimPrefix(c.Extension, ".")))
+	return fmt.Sprintf("%s-%s-%s%s.%s", name, filenameID(c.ID), slug, tag, strings.ToLower(strings.TrimPrefix(c.Extension, ".")))
 }
 
 // A failed API request cannot establish that an existing destination changed.

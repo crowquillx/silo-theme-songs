@@ -30,7 +30,7 @@ func TestManifestAcceptsFormText(t *testing.T) {
 	if err := protojson.Unmarshal(manifestJSON, &m); err != nil {
 		t.Fatal(err)
 	}
-	form := map[string]any{"api_key": "key", "library_ids": `["3"]`, "skip_library_ids": "4", "exclude_items": "5", "anime_library_ids": "6", "destinations": `{"allowed_roots":["/media"]}`, "provider": "{}", "anime_provider": `{"op":false}`, "dry_run": false, "anime_themes": true, "anime_openings": true, "anime_endings": false, "anime_spoilers": false, "anime_nsfw": false, "assisted_search": false, "manage_tools": true, "max_downloads": 0}
+	form := map[string]any{"api_key": "key", "library_ids": `["3"]`, "skip_library_ids": "4", "exclude_items": "5", "anime_library_ids": "6", "destinations": `{"allowed_roots":["/media"]}`, "provider": "{}", "anime_provider": `{"op":false}`, "dry_run": false, "anime_themes": true, "anime_openings": true, "anime_endings": false, "anime_spoilers": false, "anime_nsfw": false, "assisted_search": false, "theme_loudness": "-16", "redownload_mismatched": false, "manage_tools": true, "max_downloads": 0}
 	if err := config.ValidateManifestGlobalValue(&m, "settings", form); err != nil {
 		t.Fatal(err)
 	}

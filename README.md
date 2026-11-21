@@ -1,6 +1,6 @@
 # Silo Theme Songs
 
-Downloads theme songs for movies and series and saves them as MP3 in `theme-music` folders. Movies and most series get their theme from ThemerrDB. Anime series get their openings and endings from AnimeThemes, one set per season. Existing themes are never replaced.
+Downloads theme songs for movies and series and saves them as MP3 in `theme-music` folders. Movies and most series get their theme from ThemerrDB. Anime series get their openings and endings from AnimeThemes, one set per season. Every theme is leveled to the same volume. Existing themes are never replaced unless you turn on **Re-download themes that don't match these settings**.
 
 Part of [Crowquillx Silo Plugins](https://github.com/crowquillx/crowquillx-silo-plugins#install). Supports Linux amd64 and arm64.
 
@@ -33,14 +33,14 @@ Versions before 0.2.4 use the AnimeThemes JSON:API at `api.animethemes.moe`. It 
 Only the API key is required. The settings form groups the rest:
 
 - **Libraries.** **Skip these libraries** leaves libraries out; every other movie and series library is used, including new ones. **Only these libraries** limits runs to a list instead. The Theme Songs page has checkboxes that fill in **Skip these libraries** for you.
-- **Downloads.** **Dry run** lists what would be downloaded without saving files. **Use AnimeThemes for anime** turns anime season themes on or off, with switches for openings, endings, spoiler themes and NSFW themes. **Suggest YouTube matches** searches YouTube when ThemerrDB has no theme and lists candidates on the Theme Songs page; nothing downloads until you save a URL for the item.
+- **Downloads.** **Dry run** lists what would be downloaded without saving files. **Use AnimeThemes for anime** turns anime season themes on or off, with switches for openings, endings, spoiler themes and NSFW themes. **Suggest YouTube matches** searches YouTube when ThemerrDB has no theme and lists candidates on the Theme Songs page; nothing downloads until you save a URL for the item. **Theme volume** and **Re-download themes that don't match these settings** are described below.
 - **Advanced.** Leave these empty unless your setup differs from Silo's Docker image.
 
 | Advanced setting | Default |
 | --- | --- |
 | AnimeThemes libraries | Every series library is checked for anime |
 | Skip these items | None |
-| Downloads per run | No limit |
+| Downloads per run | No limit, replacements included |
 | Install yt-dlp and Deno | On. Off uses `yt-dlp` and Deno or Node 22+ from PATH |
 | Silo URL | Silo's internal API address |
 | Profile ID | The API key owner's primary profile |
@@ -49,6 +49,34 @@ Only the API key is required. The settings form groups the rest:
 | Writable roots and path mappings (JSON) | The selected libraries' folders |
 | ThemerrDB and YouTube settings (JSON) | See below |
 | AnimeThemes settings (JSON) | See below |
+
+### Theme volume
+
+Sources release themes at very different volumes: an anime opening can be 10 dB or more louder than an old film score. **Theme volume** measures each download's loudness (EBU R128, in LUFS) and applies one fixed gain, so every theme plays at about the same level. The music's own dynamics stay intact. A theme that can't reach the level without its peaks going above −1 dBTP is raised only as far as it can go, so it stays a little quieter instead of being compressed or clipped.
+
+| Setting | Level | Sounds like |
+| --- | --- | --- |
+| Very quiet | −23 LUFS | European TV broadcasts; themes stay well in the background |
+| Quiet | −20 LUFS | |
+| Soft | −18 LUFS | The ReplayGain reference level used by many music players |
+| Balanced (default) | −16 LUFS | Apple Music and most podcasts |
+| Loud | −14 LUFS | Spotify, YouTube and Tidal |
+| Very loud | −11 LUFS | Spotify's Loud setting |
+| Original | | Each source as released, so volumes vary |
+
+A step of 1 LUFS is about 1 dB, and 10 steps sound about twice as loud. Leveling re-encodes each theme to 192 kbps MP3 once, since YouTube audio now stays in its original codec until then. An MP3 already within 0.5 dB of the level is kept as it is. JSON settings also accept any whole number from −30 to −10, such as `"theme_loudness": -17`.
+
+### Re-downloading themes that don't match the settings
+
+Changing **Theme volume** or a theme's source affects new downloads only. Turn on **Re-download themes that don't match these settings** to bring existing themes in line, like the Jellyfin AnimeThemes plugin's **Enforce conformity** option. Each run then:
+
+- downloads a theme again when its volume differs from **Theme volume**, including themes downloaded before this setting existed;
+- replaces a ThemerrDB or YouTube theme whose source changed, such as after you save a URL override;
+- removes AnimeThemes themes the settings no longer select, such as endings after you turn off **Anime endings**.
+
+The old theme stays until its replacement is saved, so a failed download leaves it playing. A folder for which the settings select no theme at all keeps its themes, because that can also mean a source has no data for now. Only themes Theme Songs downloaded are replaced; themes you added or edited, and skipped items and libraries, are left alone. Try it with **Dry run** first: the Theme Songs page lists each theme as `would_download` and `would_remove`. **Downloads per run** limits replacements too.
+
+### JSON settings
 
 **ThemerrDB and YouTube settings** accept `url_overrides` (catalog item ID to a YouTube or direct audio URL), `direct_template`, `allowed_audio_hosts`, `yt_dlp`, `ffmpeg`, `js_runtime`, `max_bytes`, `timeout_seconds`, `types` (`movie`, `series`), `search_soundtrack`, `allow_covers` and `allow_instrumental`.
 

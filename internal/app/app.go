@@ -57,7 +57,7 @@ func New(c pluginapp.Config) (pluginapp.Provider, error) {
 	if o.MaxBytes < 1 || o.MaxBytes > 512<<20 || o.TimeoutSeconds < 1 || o.TimeoutSeconds > 1200 {
 		return nil, errors.New("invalid download size or time limit")
 	}
-	a := &App{opts: o, resolver: &provider.Resolver{DB: &provider.ThemerrDB{}, AllowedDirectHosts: o.Hosts}, downloader: &provider.Downloader{Tools: provider.ToolPaths{YTDLP: o.YTDLP, FFmpeg: provider.DefaultTool(o.FFmpeg, "ffmpeg"), FFprobe: provider.DefaultTool(c.FFprobe, "ffprobe"), JSRuntime: o.JSRuntime}, StageParent: c.StateDir, AllowedDirectHosts: o.Hosts, MaxBytes: o.MaxBytes, MaxDuration: time.Duration(o.TimeoutSeconds) * time.Second}}
+	a := &App{opts: o, resolver: &provider.Resolver{DB: &provider.ThemerrDB{}, AllowedDirectHosts: o.Hosts}, downloader: &provider.Downloader{Tools: provider.ToolPaths{YTDLP: o.YTDLP, FFmpeg: provider.DefaultTool(o.FFmpeg, "ffmpeg"), FFprobe: provider.DefaultTool(c.FFprobe, "ffprobe"), JSRuntime: o.JSRuntime}, StageParent: c.StateDir, AllowedDirectHosts: o.Hosts, MaxBytes: o.MaxBytes, MaxDuration: time.Duration(o.TimeoutSeconds) * time.Second, Loudness: c.LoudnessTarget()}}
 	// Silo's Docker image has no yt-dlp or JavaScript runtime; install them
 	// beneath the state directory unless the operator opts out.
 	if o.ManageTools == nil || *o.ManageTools {

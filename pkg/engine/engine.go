@@ -35,6 +35,8 @@ const (
 	Protected  Status = "protected"
 	Stale      Status = "stale"
 	Failed     Status = "failed"
+	// Removing marks a theme Remove is deleting. Recover finishes the job.
+	Removing Status = "removing"
 )
 
 type Record struct {
@@ -46,10 +48,14 @@ type Record struct {
 	ServerPath  string                   `json:"server_path"`
 	Fingerprint string                   `json:"fingerprint"`
 	SourceID    string                   `json:"source_id"`
-	Filename    string                   `json:"filename"`
-	Checksum    string                   `json:"checksum"`
-	Size        int64                    `json:"size"`
-	Status      Status                   `json:"status"`
+	// Audio names the processing the file received, such as the loudness
+	// target. Empty, as in records from before loudness settings, means the
+	// source's own level.
+	Audio    string `json:"audio,omitempty"`
+	Filename string `json:"filename"`
+	Checksum string `json:"checksum"`
+	Size     int64  `json:"size"`
+	Status   Status `json:"status"`
 	// Attempts counts discovery checks; LastAttempt is the latest one.
 	// ScanRequests counts the checks that also asked Silo to scan the file.
 	Attempts     int       `json:"attempts"`
@@ -77,6 +83,7 @@ type Engine struct {
 var namePattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,159}\.(mp3|m4a|m4b|flac|ogg|opus|wav|aac)$`)
 var providerPattern = regexp.MustCompile(`^[a-z][a-z0-9_-]{0,39}$`)
 var sourcePattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9:._-]{0,199}$`)
+var audioPattern = regexp.MustCompile(`^([a-z][a-z0-9:._-]{0,63})?$`)
 
 func Open(stateDir, provider string) (*Engine, error) {
 	if !providerPattern.MatchString(provider) {
@@ -255,10 +262,16 @@ func validFilename(name string) bool {
 }
 
 func (e *Engine) Publish(ctx context.Context, dest destinations.Destination, sourceID, filename, stagedPath string, revalidate func(context.Context) error) (Record, error) {
+	return e.PublishAudio(ctx, dest, sourceID, "", filename, stagedPath, revalidate)
+}
+
+// PublishAudio publishes like Publish and records the audio processing the
+// staged file received.
+func (e *Engine) PublishAudio(ctx context.Context, dest destinations.Destination, sourceID, audio, filename, stagedPath string, revalidate func(context.Context) error) (Record, error) {
 	if err := validDestination(dest); err != nil {
 		return Record{}, err
 	}
-	if !validFilename(filename) || !sourcePattern.MatchString(sourceID) || revalidate == nil {
+	if !validFilename(filename) || !sourcePattern.MatchString(sourceID) || !audioPattern.MatchString(audio) || revalidate == nil {
 		return Record{}, errors.New("invalid publication request")
 	}
 	checksum, size, err := checksumFile(stagedPath)
@@ -293,7 +306,7 @@ func (e *Engine) Publish(ctx context.Context, dest destinations.Destination, sou
 		r := e.state.Records[i]
 		if r.Status == Failed {
 			replaceIndex = i
-		} else if r.SourceID != sourceID || r.Checksum != checksum || r.Fingerprint != dest.Fingerprint || r.Status == Protected || r.Status == Stale {
+		} else if r.SourceID != sourceID || r.Audio != audio || r.Checksum != checksum || r.Fingerprint != dest.Fingerprint || r.Status == Protected || r.Status == Stale {
 			return Record{}, errors.New("existing managed file differs; operator review required")
 		} else if r.Status == Published || r.Status == Discovered {
 			if err := requireMarker(owner, e.provider, dest.OwnerID); err != nil {
@@ -353,7 +366,7 @@ func (e *Engine) Publish(ctx context.Context, dest destinations.Destination, sou
 	if err := checkUnownedAudio(owner, theme, owned); err != nil {
 		return Record{}, err
 	}
-	r := Record{Destination: dest, Provider: e.provider, LibraryID: dest.LibraryID, OwnerID: dest.OwnerID, LocalPath: dest.LocalPath, ServerPath: dest.ServerPath, Fingerprint: dest.Fingerprint, SourceID: sourceID, Filename: filename, Checksum: checksum, Size: size, Status: Pending, Updated: time.Now().UTC()}
+	r := Record{Destination: dest, Provider: e.provider, LibraryID: dest.LibraryID, OwnerID: dest.OwnerID, LocalPath: dest.LocalPath, ServerPath: dest.ServerPath, Fingerprint: dest.Fingerprint, SourceID: sourceID, Audio: audio, Filename: filename, Checksum: checksum, Size: size, Status: Pending, Updated: time.Now().UTC()}
 	var old Record
 	if replaceIndex >= 0 {
 		old = e.state.Records[replaceIndex]

@@ -1,12 +1,14 @@
 package provider
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"net/http"
 	"os"
 	"os/exec"
@@ -100,6 +102,9 @@ type Downloader struct {
 	AllowedDirectHosts []string
 	MaxBytes           int64
 	MaxDuration        time.Duration
+	// Loudness is the target loudness in LUFS. Zero keeps each source's own
+	// level; any other value re-encodes every theme to that level.
+	Loudness float64
 
 	mu           sync.Mutex
 	failedVideos map[[32]byte]struct{}
@@ -132,7 +137,7 @@ func (d *Downloader) Preflight(ctx context.Context, source Source) (ToolVersions
 	if err != nil {
 		return versions, err
 	}
-	if source.Extract || source.Format != "mp3" {
+	if source.Extract || source.Format != "mp3" || d.Loudness != 0 {
 		versions.FFmpeg, err = checkTool(ctx, d.Tools.FFmpeg, "ffmpeg", "-version")
 		if err != nil {
 			return versions, err
@@ -280,8 +285,9 @@ func (d *Downloader) Fetch(ctx context.Context, source Source) (_ *StagedAudio, 
 		}
 	}()
 	var path string
+	format := source.Format
 	if source.Extract {
-		path, err = d.extract(jobCtx, dir, source.URL, max, versions)
+		path, format, err = d.extract(jobCtx, dir, source.URL, max, versions)
 		if err != nil {
 			if IsCode(err, UnavailableMedia) {
 				d.recordFailure(source.URL)
@@ -298,21 +304,25 @@ func (d *Downloader) Fetch(ctx context.Context, source Source) (_ *StagedAudio, 
 		}
 	}
 	info, err := os.Lstat(path)
-	if errors.Is(err, os.ErrNotExist) && source.Extract {
-		return nil, &Error{UnavailableMedia, "extractor produced no audio"}
-	}
 	if err != nil || !info.Mode().IsRegular() || info.Size() == 0 {
 		return nil, &Error{InvalidAudio, "staged file"}
 	}
 	if info.Size() > max {
 		return nil, &Error{LimitExceeded, "staged size"}
 	}
-	audio, err := d.probe(jobCtx, path, source.Format)
+	audio, err := d.probe(jobCtx, path, format)
 	if err != nil {
 		return nil, err
 	}
-	if source.Format != "mp3" {
-		path, err = d.convertMP3(jobCtx, dir, path, audio, max)
+	gain := 0.0
+	if d.Loudness != 0 {
+		if gain, err = d.loudnessGain(jobCtx, path); err != nil {
+			return nil, err
+		}
+	}
+	// An MP3 already close to the target keeps its original encoding.
+	if format != "mp3" || math.Abs(gain) >= minGain {
+		path, err = d.convertMP3(jobCtx, dir, path, audio, gain, max)
 		if err != nil {
 			return nil, err
 		}
@@ -351,22 +361,23 @@ func (d *Downloader) recordFailure(rawURL string) {
 	}
 }
 
-func (d *Downloader) extract(ctx context.Context, dir, raw string, max int64, tools ToolVersions) (_ string, resultErr error) {
+// extract saves a video's audio track in its original codec, so the theme is
+// encoded to MP3 only once. It returns the file and its format.
+func (d *Downloader) extract(ctx context.Context, dir, raw string, max int64, tools ToolVersions) (_, _ string, resultErr error) {
 	release, err := d.youtubeLimit().acquire(ctx)
 	if err != nil {
-		return "", err
+		return "", "", err
 	}
 	defer func() { release(resultErr) }()
-	path := filepath.Join(dir, "theme.mp3")
 	ffmpegPath, err := exec.LookPath(d.Tools.FFmpeg)
 	if err != nil {
-		return "", &Error{MissingTool, "ffmpeg"}
+		return "", "", &Error{MissingTool, "ffmpeg"}
 	}
 	ffmpegPath, err = filepath.Abs(ffmpegPath)
 	if err != nil {
-		return "", &Error{MissingTool, "ffmpeg"}
+		return "", "", &Error{MissingTool, "ffmpeg"}
 	}
-	args := []string{"--ignore-config", "--no-config-locations", "--no-plugin-dirs", "--no-playlist", "--use-extractors", "youtube,youtube:tab,end", "--default-search", "error", "--no-cache-dir", "--no-progress", "--no-write-info-json", "--no-write-thumbnail", "--no-write-subs", "--no-write-auto-subs", "--no-mtime", "--socket-timeout", "15", "--max-filesize", strconv.FormatInt(max, 10), "--max-downloads", "1", "--match-filters", "!is_live & duration <= 1200", "-f", "bestaudio/best", "-x", "--audio-format", "mp3", "--audio-quality", "192K", "--ffmpeg-location", ffmpegPath, "-o", filepath.Join(dir, "theme.%(ext)s"), "--", raw}
+	args := []string{"--ignore-config", "--no-config-locations", "--no-plugin-dirs", "--no-playlist", "--use-extractors", "youtube,youtube:tab,end", "--default-search", "error", "--no-cache-dir", "--no-progress", "--no-write-info-json", "--no-write-thumbnail", "--no-write-subs", "--no-write-auto-subs", "--no-mtime", "--socket-timeout", "15", "--max-filesize", strconv.FormatInt(max, 10), "--max-downloads", "1", "--match-filters", "!is_live & duration <= 1200", "-f", "bestaudio/best", "-x", "--audio-format", "best", "--audio-quality", "0", "--ffmpeg-location", ffmpegPath, "-o", filepath.Join(dir, "theme.%(ext)s"), "--", raw}
 	args = append(youtubeArgs(), args...)
 	args = append([]string{"--no-js-runtimes", "--js-runtimes", tools.jsRuntimeArg}, args...)
 	cmd := exec.Command(tools.ytdlpPath, args...)
@@ -375,9 +386,33 @@ func (d *Downloader) extract(ctx context.Context, dir, raw string, max int64, to
 	// --max-downloads 1 returns 101 after a successful download. Accept that
 	// stop only here; Fetch still requires a complete, probed audio-only file.
 	if err := runBounded(ctx, cmd, dir, max*2+(1<<20), 101); err != nil {
-		return "", err
+		return "", "", err
 	}
-	return path, nil
+	return extractedAudio(dir)
+}
+
+// extractedAudio finds the one theme file yt-dlp wrote. With --audio-format
+// best it keeps AAC, Opus, Vorbis, FLAC, MP3 and WAV as they are.
+func extractedAudio(dir string) (string, string, error) {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return "", "", &Error{Transient, "staging"}
+	}
+	var found []string
+	for _, entry := range entries {
+		name := entry.Name()
+		ext := filepath.Ext(name)
+		if strings.TrimSuffix(name, ext) == "theme" && directFormats[ext] {
+			found = append(found, name)
+		}
+	}
+	switch len(found) {
+	case 0:
+		return "", "", &Error{UnavailableMedia, "extractor produced no audio"}
+	case 1:
+		return filepath.Join(dir, found[0]), strings.TrimPrefix(filepath.Ext(found[0]), "."), nil
+	}
+	return "", "", &Error{InvalidAudio, "extractor produced several files"}
 }
 
 func (d *Downloader) downloadDirect(ctx context.Context, dir string, source Source, max int64) (string, error) {
@@ -529,16 +564,83 @@ func (d *Downloader) probe(ctx context.Context, path, format string) (audioStrea
 	return first, nil
 }
 
+// Loudness normalization applies one fixed gain to the whole theme, so the
+// music keeps its dynamics. The gain never pushes the true peak above
+// peakCeiling; a quiet theme with loud peaks stays below the target instead
+// of being compressed or clipped.
+const (
+	peakCeiling = -1.0 // dBTP
+	minGain     = 0.5  // dB; smaller changes leave an MP3 as it is
+	maxBoost    = 30.0 // dB
+	maxCut      = -40.0
+)
+
+// loudnessGain measures a validated local file with FFmpeg's EBU R128
+// loudnorm filter and returns the gain that brings it to d.Loudness.
+func (d *Downloader) loudnessGain(ctx context.Context, input string) (float64, error) {
+	filter := fmt.Sprintf("loudnorm=I=%.1f:TP=%.1f:print_format=json", d.Loudness, peakCeiling)
+	cmd := exec.Command(d.Tools.FFmpeg, "-nostdin", "-hide_banner", "-nostats", "-loglevel", "info", "-xerror", "-protocol_whitelist", "file,pipe", "-max_alloc", "67108864", "-probesize", "10000000", "-analyzeduration", "10000000", "-i", input, "-map", "0:a:0", "-vn", "-sn", "-dn", "-af", filter, "-f", "null", "-")
+	cmd.Env = []string{"PATH=/usr/bin:/bin", "HOME=/nonexistent"}
+	var output limitedBuffer
+	output.max = 256 << 10
+	cmd.Stdout = &limitedBuffer{max: 1024}
+	cmd.Stderr = &output
+	if err := runBounded(ctx, cmd, "", 0); err != nil {
+		if ctx.Err() != nil {
+			return 0, ctx.Err()
+		}
+		if IsCode(err, MissingTool) {
+			return 0, err
+		}
+		return 0, &Error{InvalidAudio, "loudness analysis"}
+	}
+	buf, overflow := output.snapshot()
+	start, end := bytes.LastIndexByte(buf, '{'), bytes.LastIndexByte(buf, '}')
+	var stats struct {
+		Integrated string `json:"input_i"`
+		TruePeak   string `json:"input_tp"`
+	}
+	if overflow || start < 0 || end < start || json.Unmarshal(buf[start:end+1], &stats) != nil {
+		return 0, &Error{InvalidAudio, "loudness analysis output"}
+	}
+	return normalizationGain(d.Loudness, stats.Integrated, stats.TruePeak)
+}
+
+// normalizationGain returns the gain for loudnorm's measurements. Silence
+// measures as -inf and keeps its level.
+func normalizationGain(target float64, integrated, truePeak string) (float64, error) {
+	i, err := strconv.ParseFloat(integrated, 64)
+	if err != nil {
+		return 0, &Error{InvalidAudio, "loudness analysis output"}
+	}
+	tp, err := strconv.ParseFloat(truePeak, 64)
+	if err != nil {
+		return 0, &Error{InvalidAudio, "loudness analysis output"}
+	}
+	if math.IsInf(i, 0) || math.IsNaN(i) || i < -70 {
+		return 0, nil
+	}
+	gain := target - i
+	if !math.IsInf(tp, 0) && !math.IsNaN(tp) && tp+gain > peakCeiling {
+		gain = peakCeiling - tp
+	}
+	return math.Max(maxCut, math.Min(maxBoost, gain)), nil
+}
+
 // convertMP3 reads only the validated local file. Input and output each have
 // their own size bound; the same job deadline covers download and conversion.
-func (d *Downloader) convertMP3(ctx context.Context, dir, input string, audio audioStream, max int64) (string, error) {
+// A gain other than zero is applied while encoding.
+func (d *Downloader) convertMP3(ctx context.Context, dir, input string, audio audioStream, gain float64, max int64) (string, error) {
 	outDir := filepath.Join(dir, "converted")
 	if err := os.Mkdir(outDir, 0700); err != nil {
 		return "", &Error{Transient, "conversion staging"}
 	}
 	output := filepath.Join(outDir, "theme.mp3")
 	args := []string{"-nostdin", "-hide_banner", "-loglevel", "error", "-xerror", "-n", "-protocol_whitelist", "file,pipe", "-max_alloc", "67108864", "-probesize", "10000000", "-analyzeduration", "10000000", "-i", input, "-map", "0:a:0", "-vn", "-sn", "-dn", "-map_metadata", "-1", "-map_chapters", "-1"}
-	if audio.CodecName == "mp3" {
+	if math.Abs(gain) >= minGain {
+		args = append(args, "-af", fmt.Sprintf("volume=%.2fdB", gain))
+	}
+	if audio.CodecName == "mp3" && math.Abs(gain) < minGain {
 		args = append(args, "-c:a", "copy")
 	} else {
 		args = append(args, "-c:a", "libmp3lame", "-b:a", "192k", "-ar", "44100", "-ac", strconv.Itoa(min(audio.Channels, 2)), "-threads", "1")

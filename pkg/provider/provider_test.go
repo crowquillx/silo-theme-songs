@@ -155,7 +155,7 @@ func TestExtractionArgumentsStagingAndAudioProbe(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, flag := range []string{"--ignore-config", "--no-playlist", "--no-plugin-dirs", "--max-filesize", "--use-extractors", "--audio-format", "192K"} {
+	for _, flag := range []string{"--ignore-config", "--no-playlist", "--no-plugin-dirs", "--max-filesize", "--use-extractors", "--audio-format\nbest\n"} {
 		if !strings.Contains(string(args), flag) {
 			t.Fatalf("missing %s: %s", flag, args)
 		}

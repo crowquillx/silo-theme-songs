@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"time"
 
@@ -98,7 +99,7 @@ func (e *Engine) MarkStale(dest destinations.Destination) error {
 	}
 	changed := false
 	for i, r := range e.state.Records {
-		if r.LibraryID == dest.LibraryID && r.LocalPath == dest.LocalPath && r.OwnerID == dest.OwnerID && r.Status != Protected {
+		if r.LibraryID == dest.LibraryID && r.LocalPath == dest.LocalPath && r.OwnerID == dest.OwnerID && r.Status != Protected && r.Status != Removing {
 			r.Status = Stale
 			r.Updated = time.Now().UTC()
 			e.state.Records[i] = r
@@ -142,7 +143,7 @@ func (e *Engine) Check(ctx context.Context, dest destinations.Destination) ([]Re
 		if r.LibraryID != dest.LibraryID || r.LocalPath != dest.LocalPath || r.OwnerID != dest.OwnerID {
 			continue
 		}
-		if r.Status != Failed && r.Status != Pending {
+		if r.Status != Failed && r.Status != Pending && r.Status != Removing {
 			if err := verifyRecord(owner, r); err != nil {
 				r.Status = Protected
 				r.Updated = time.Now().UTC()
@@ -159,12 +160,31 @@ func (e *Engine) Check(ctx context.Context, dest destinations.Destination) ([]Re
 }
 
 // Recover resolves pending intents. A pending file whose content matches
-// becomes published; a missing one becomes a retryable failure.
+// becomes published; a missing one becomes a retryable failure. A removal
+// that was interrupted finishes.
 func (e *Engine) Recover(ctx context.Context) (int, error) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	if e.closed {
 		return 0, errors.New("engine closed")
+	}
+	for i := 0; i < len(e.state.Records); {
+		if e.state.Records[i].Status != Removing {
+			i++
+			continue
+		}
+		if err := ctx.Err(); err != nil {
+			return 0, err
+		}
+		n := len(e.state.Records)
+		err := e.finishRemoval(ctx, i)
+		if len(e.state.Records) == n {
+			// A changed file is now protected; anything else is retried.
+			if err != nil && e.state.Records[i].Status == Removing {
+				return 0, err
+			}
+			i++
+		}
 	}
 	count := 0
 	for i, r := range e.state.Records {
@@ -268,4 +288,107 @@ func verifyRecord(owner *os.Root, r Record) error {
 		return errors.New("managed theme checksum changed")
 	}
 	return nil
+}
+
+// Remove deletes a published or discovered theme the engine manages and
+// forgets it. A file whose content changed is not deleted: its record
+// becomes protected instead.
+func (e *Engine) Remove(ctx context.Context, rec Record) error {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if e.closed {
+		return errors.New("engine closed")
+	}
+	i := e.find(recordKey(rec))
+	if i < 0 {
+		return errors.New("unknown theme")
+	}
+	r := e.state.Records[i]
+	if r.Status != Published && r.Status != Discovered {
+		return errors.New("only a published theme can be removed")
+	}
+	owner, unlock, err := lockOwner(ctx, r.LocalPath)
+	if err != nil {
+		return err
+	}
+	err = requireMarker(owner, e.provider, r.OwnerID)
+	if err == nil {
+		err = verifyRecord(owner, r)
+	}
+	unlock()
+	if err != nil {
+		r.Status = Protected
+		r.Updated = time.Now().UTC()
+		e.state.Records[i] = r
+		if saveErr := e.save(); saveErr != nil {
+			return saveErr
+		}
+		return err
+	}
+	old := r
+	r.Status = Removing
+	r.Updated = time.Now().UTC()
+	e.state.Records[i] = r
+	if err := e.save(); err != nil {
+		e.state.Records[i] = old
+		return err
+	}
+	return e.finishRemoval(ctx, i)
+}
+
+// finishRemoval deletes the file of the removing record at index i, if its
+// content still matches, and drops the record. The caller holds e.mu.
+func (e *Engine) finishRemoval(ctx context.Context, i int) error {
+	r := e.state.Records[i]
+	owner, unlock, err := lockOwner(ctx, r.LocalPath)
+	if errors.Is(err, os.ErrNotExist) {
+		// The owner folder is gone, and the file with it.
+		return e.drop(i)
+	}
+	if err != nil {
+		return err
+	}
+	defer unlock()
+	if err := requireMarker(owner, e.provider, r.OwnerID); err != nil {
+		return e.protect(i, err)
+	}
+	err = verifyRecord(owner, r)
+	if errors.Is(err, os.ErrNotExist) {
+		return e.drop(i)
+	}
+	if err != nil {
+		return e.protect(i, err)
+	}
+	theme, err := owner.OpenRoot("theme-music")
+	if err != nil {
+		return err
+	}
+	defer theme.Close()
+	if err := theme.Remove(r.Filename); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+	if err := syncDir(theme); err != nil {
+		return err
+	}
+	return e.drop(i)
+}
+
+func (e *Engine) drop(i int) error {
+	old := slices.Clone(e.state.Records)
+	e.state.Records = slices.Delete(e.state.Records, i, i+1)
+	if err := e.save(); err != nil {
+		e.state.Records = old
+		return err
+	}
+	return nil
+}
+
+// protect keeps a file whose owner or content changed and returns why.
+func (e *Engine) protect(i int, cause error) error {
+	e.state.Records[i].Status = Protected
+	e.state.Records[i].Updated = time.Now().UTC()
+	if err := e.save(); err != nil {
+		return err
+	}
+	return cause
 }

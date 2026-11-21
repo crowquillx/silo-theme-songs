@@ -3,15 +3,18 @@
 package pluginapp
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
 	"os"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 	"unicode"
 
@@ -44,6 +47,12 @@ type Config struct {
 	// AnimeThemes settings. The switches below override the matching keys.
 	Provider      json.RawMessage `json:"provider"`
 	AnimeProvider json.RawMessage `json:"anime_provider"`
+
+	// ThemeLoudness levels every download to one loudness: "off", or a
+	// whole number of LUFS from -30 to -10. Empty uses defaultLoudness.
+	ThemeLoudness Loudness `json:"theme_loudness"`
+	// Redownload replaces managed themes that no longer match the settings.
+	Redownload *bool `json:"redownload_mismatched"`
 
 	ManageTools    *bool `json:"manage_tools"`
 	AssistedSearch *bool `json:"assisted_search"`
@@ -133,6 +142,81 @@ func (c Config) dryRun() bool {
 }
 
 func (c Config) animeEnabled() bool { return on(c.AnimeThemes, true) }
+
+// redownload reports whether runs replace managed themes that no longer
+// match the settings.
+func (c Config) redownload() bool { return on(c.Redownload, false) }
+
+// defaultLoudness is the theme_loudness target when none is saved, the level
+// Apple Music and most podcasts use.
+const defaultLoudness = -16
+
+// Loudness is the theme_loudness setting. JSON settings may give it as a
+// number or as text; the settings form saves text.
+type Loudness string
+
+func (l *Loudness) UnmarshalJSON(data []byte) error {
+	d := json.NewDecoder(bytes.NewReader(data))
+	d.UseNumber()
+	var v any
+	if e := d.Decode(&v); e != nil {
+		return e
+	}
+	switch x := v.(type) {
+	case nil:
+		*l = ""
+	case string:
+		*l = Loudness(strings.TrimSpace(x))
+	case json.Number:
+		*l = Loudness(x.String())
+	default:
+		return errors.New("theme_loudness must be off or a number")
+	}
+	return nil
+}
+
+var errLoudness = errors.New("Theme volume must be off or a whole number of LUFS from -30 to -10")
+
+// target returns the loudness in LUFS, or 0 for off.
+func (l Loudness) target() (int, error) {
+	text := strings.ToLower(strings.ReplaceAll(string(l), "−", "-"))
+	switch text {
+	case "":
+		return defaultLoudness, nil
+	case "off":
+		return 0, nil
+	}
+	n, e := strconv.ParseFloat(text, 64)
+	if e != nil || n != math.Trunc(n) || n < -30 || n > -10 {
+		return 0, errLoudness
+	}
+	return int(n), nil
+}
+
+// LoudnessTarget is the loudness downloads are leveled to in LUFS, or 0 to
+// keep each source's level. Validate rejects settings it cannot read.
+func (c Config) LoudnessTarget() float64 {
+	n, _ := c.ThemeLoudness.target()
+	return float64(n)
+}
+
+// audioProfile names the processing new downloads receive. The engine
+// records it with each theme; "" is the source's own level.
+func (c Config) audioProfile() string {
+	if n, _ := c.ThemeLoudness.target(); n != 0 {
+		return fmt.Sprintf("loudness:%d", n)
+	}
+	return ""
+}
+
+// profileTag is the file name suffix for an audio profile, so a theme saved
+// with other settings never has the same name as its replacement.
+func profileTag(profile string) string {
+	if n, ok := strings.CutPrefix(profile, "loudness:"); ok {
+		return "-lufs" + strings.TrimPrefix(n, "-")
+	}
+	return ""
+}
 
 // selected reports whether runs include a library.
 func (c Config) selected(l siloapi.Library) bool {
@@ -262,6 +346,9 @@ func (c Config) Validate() error {
 	}
 	if c.FFprobe == "" {
 		return errors.New("ffprobe executable is required")
+	}
+	if _, e := c.ThemeLoudness.target(); e != nil {
+		return e
 	}
 	return c.Policy.Validate()
 }

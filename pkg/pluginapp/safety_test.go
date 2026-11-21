@@ -130,7 +130,7 @@ func TestPendingRecoveryRequestsScan(t *testing.T) {
 
 func TestUnsafeCandidateIDUsesHashFilename(t *testing.T) {
 	c := Candidate{ID: "https://example.org/?token=secret", Title: "A Title", Extension: "mp3"}
-	name := filename("general", c)
+	name := filename("general", c, "")
 	if strings.Contains(name, "token") || !strings.HasPrefix(name, "general-hash-") {
 		t.Fatalf("unsafe ID leaked into filename: %s", name)
 	}

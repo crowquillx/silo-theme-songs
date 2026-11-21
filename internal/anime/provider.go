@@ -104,7 +104,7 @@ func New(c pluginapp.Config) (pluginapp.Provider, error) {
 			return nil, e
 		}
 	}
-	return &Adapter{config: cfg, stateDir: c.StateDir, mapping: m, themes: animethemes.NewClient(nil), downloader: &provider.Downloader{Tools: provider.ToolPaths{FFprobe: provider.DefaultTool(c.FFprobe, "ffprobe"), FFmpeg: provider.DefaultTool(cfg.FFmpeg, "ffmpeg")}, StageParent: c.StateDir, AllowedDirectHosts: cfg.AudioHosts}}, nil
+	return &Adapter{config: cfg, stateDir: c.StateDir, mapping: m, themes: animethemes.NewClient(nil), downloader: &provider.Downloader{Tools: provider.ToolPaths{FFprobe: provider.DefaultTool(c.FFprobe, "ffprobe"), FFmpeg: provider.DefaultTool(cfg.FFmpeg, "ffmpeg")}, StageParent: c.StateDir, AllowedDirectHosts: cfg.AudioHosts, Loudness: c.LoudnessTarget()}}, nil
 }
 func readCached(path string) ([]byte, error) {
 	f, e := os.Open(path)

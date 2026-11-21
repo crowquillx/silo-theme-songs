@@ -209,6 +209,7 @@ type fakeProvider struct {
 	staged     string
 	calls      atomic.Int32
 	selectErr  error
+	fetchErr   error
 	candidates []Candidate
 	// claims lists the series the provider claims, for AnimeThemes fakes.
 	claims map[string]bool
@@ -229,6 +230,9 @@ func (f *fakeProvider) Select(_ context.Context, t Target) ([]Candidate, error) 
 
 func (f *fakeProvider) Fetch(context.Context, Candidate) (*provider.StagedAudio, error) {
 	f.calls.Add(1)
+	if f.fetchErr != nil {
+		return nil, f.fetchErr
+	}
 	return &provider.StagedAudio{Path: f.staged, Format: "mp3"}, nil
 }
 
