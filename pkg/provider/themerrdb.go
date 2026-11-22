@@ -14,7 +14,9 @@ import (
 	"github.com/crowquillx/silo-theme-songs/pkg/ratelimit"
 )
 
-const defaultDBURL = "https://app.lizardbyte.dev/ThemerrDB"
+// ThemerrDB is published at themerr.lizardbyte.dev. The earlier app.lizardbyte.dev/ThemerrDB
+// path now answers 404 for every id, which this provider reads as "no theme".
+const defaultDBURL = "https://themerr.lizardbyte.dev/ThemerrDB"
 
 type dbEntry struct {
 	url     string

@@ -31,3 +31,9 @@ func TestThemerrDBCooldownSurvivesNewClient(t *testing.T) {
 		t.Fatalf("new client sent request during cooldown: calls=%d elapsed=%s", calls.Load(), time.Since(started))
 	}
 }
+
+func TestDefaultThemerrDBHost(t *testing.T) {
+	if defaultDBURL != "https://themerr.lizardbyte.dev/ThemerrDB" {
+		t.Fatalf("default ThemerrDB endpoint = %s", defaultDBURL)
+	}
+}
