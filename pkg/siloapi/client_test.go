@@ -424,3 +424,59 @@ func TestMissingProfileUsesPrimaryProfile(t *testing.T) {
 		t.Fatalf("%d profile lookups, want one", lookups.Load())
 	}
 }
+
+func multiEpisodeServer(t *testing.T, seasonsJSON string, episodes map[string]string) *httptest.Server {
+	t.Helper()
+	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/v2/catalog":
+			fmt.Fprint(w, `{"items":[{"content_id":"series:a","type":"series"}]}`)
+		case "/api/v2/catalog/items/series:a":
+			fmt.Fprint(w, `{"content_id":"series:a","type":"series","title":"A","tmdb_id":"10"}`)
+		case "/api/v2/catalog/series/series:a/seasons":
+			fmt.Fprint(w, seasonsJSON)
+		case "/api/v2/admin/items/series:a/files":
+			fmt.Fprint(w, `{"items":[{"id":"1","library_id":"1","file_path":"/media/A/Season 01/A S01E01-E02.mkv","observed_root_path":"/media/A"}]}`)
+		default:
+			if body, ok := episodes[r.URL.Path]; ok {
+				fmt.Fprint(w, body)
+				return
+			}
+			t.Errorf("unexpected request %s", r.URL.Path)
+			http.NotFound(w, r)
+		}
+	}))
+}
+
+func TestInventoryAcceptsMultiEpisodeFileInOneSeason(t *testing.T) {
+	s := multiEpisodeServer(t, `{"items":[{"content_id":"season:a:1","season_number":1}]}`, map[string]string{
+		"/api/v2/catalog/series/series:a/seasons/1/episodes": `{"items":[{"content_id":"e1","season_number":1,"episode_number":1,"files":[{"file_id":"1"}]},{"content_id":"e2","season_number":1,"episode_number":2,"files":[{"file_id":"1"}]}]}`,
+	})
+	defer s.Close()
+	c, e := New(s.URL, "key", "primary")
+	if e != nil {
+		t.Fatal(e)
+	}
+	inv, e := c.Inventory(context.Background(), Library{ID: "1", Type: "series", Paths: []string{"/media"}})
+	if e != nil {
+		t.Fatalf("multi-episode file in one season must be accepted: %v", e)
+	}
+	if len(inv.Files) != 1 || inv.Files[0].Season != 1 || inv.Files[0].Episode != 1 {
+		t.Fatalf("want one file filed under the first episode, got %+v", inv.Files)
+	}
+}
+
+func TestInventoryRefusesFileClaimedByTwoSeasons(t *testing.T) {
+	s := multiEpisodeServer(t, `{"items":[{"content_id":"season:a:1","season_number":1},{"content_id":"season:a:2","season_number":2}]}`, map[string]string{
+		"/api/v2/catalog/series/series:a/seasons/1/episodes": `{"items":[{"content_id":"e1","season_number":1,"episode_number":1,"files":[{"file_id":"1"}]}]}`,
+		"/api/v2/catalog/series/series:a/seasons/2/episodes": `{"items":[{"content_id":"e2","season_number":2,"episode_number":1,"files":[{"file_id":"1"}]}]}`,
+	})
+	defer s.Close()
+	c, e := New(s.URL, "key", "primary")
+	if e != nil {
+		t.Fatal(e)
+	}
+	if _, e = c.Inventory(context.Background(), Library{ID: "1", Type: "series", Paths: []string{"/media"}}); e == nil || !strings.Contains(e.Error(), "ambiguous episode file membership") {
+		t.Fatalf("want ambiguous membership error, got %v", e)
+	}
+}
