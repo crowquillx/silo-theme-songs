@@ -449,20 +449,27 @@ func multiEpisodeServer(t *testing.T, seasonsJSON string, episodes map[string]st
 }
 
 func TestInventoryAcceptsMultiEpisodeFileInOneSeason(t *testing.T) {
-	s := multiEpisodeServer(t, `{"items":[{"content_id":"season:a:1","season_number":1}]}`, map[string]string{
-		"/api/v2/catalog/series/series:a/seasons/1/episodes": `{"items":[{"content_id":"e1","season_number":1,"episode_number":1,"files":[{"file_id":"1"}]},{"content_id":"e2","season_number":1,"episode_number":2,"files":[{"file_id":"1"}]}]}`,
-	})
-	defer s.Close()
-	c, e := New(s.URL, "key", "primary")
-	if e != nil {
-		t.Fatal(e)
-	}
-	inv, e := c.Inventory(context.Background(), Library{ID: "1", Type: "series", Paths: []string{"/media"}})
-	if e != nil {
-		t.Fatalf("multi-episode file in one season must be accepted: %v", e)
-	}
-	if len(inv.Files) != 1 || inv.Files[0].Season != 1 || inv.Files[0].Episode != 1 {
-		t.Fatalf("want one file filed under the first episode, got %+v", inv.Files)
+	e1 := `{"content_id":"e1","season_number":1,"episode_number":1,"files":[{"file_id":"1"}]}`
+	e2 := `{"content_id":"e2","season_number":1,"episode_number":2,"files":[{"file_id":"1"}]}`
+	// Silo's row order must not decide which episode stands for the file.
+	for name, rows := range map[string]string{"ascending": e1 + "," + e2, "descending": e2 + "," + e1} {
+		t.Run(name, func(t *testing.T) {
+			s := multiEpisodeServer(t, `{"items":[{"content_id":"season:a:1","season_number":1}]}`, map[string]string{
+				"/api/v2/catalog/series/series:a/seasons/1/episodes": `{"items":[` + rows + `]}`,
+			})
+			defer s.Close()
+			c, e := New(s.URL, "key", "primary")
+			if e != nil {
+				t.Fatal(e)
+			}
+			inv, e := c.Inventory(context.Background(), Library{ID: "1", Type: "series", Paths: []string{"/media"}})
+			if e != nil {
+				t.Fatalf("multi-episode file in one season must be accepted: %v", e)
+			}
+			if len(inv.Files) != 1 || inv.Files[0].Season != 1 || inv.Files[0].Episode != 1 {
+				t.Fatalf("want one file filed under the lowest episode, got %+v", inv.Files)
+			}
+		})
 	}
 }
 
