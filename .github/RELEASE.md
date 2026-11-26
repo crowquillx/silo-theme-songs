@@ -1,10 +1,10 @@
-Theme Songs v0.3.1
+Theme Songs v0.3.2
 
-Movies and series get their themes from ThemerrDB again, and series libraries with multi-episode files are read.
+Theme Songs runs for new items after library scans again, and long runs are no longer stopped partway through.
 
-- ThemerrDB lookups now use `themerr.lizardbyte.dev`, where ThemerrDB is published now. The old address at `app.lizardbyte.dev/ThemerrDB` answers every request with HTTP 404, so 0.3.0 and earlier reported every movie and series as `provider themerrdb: absent` and downloaded no ThemerrDB themes. Thanks to @ALMN1905 (#6).
-- A file that covers several episodes of one season, such as `S01E01-E03`, no longer stops the whole library with "ambiguous episode file membership". The file counts once, under its lowest episode. A file that Silo lists under two different seasons is still refused. Thanks to @ALMN1905 (#7).
+- Silo builds from 18 November 2026 on send plugins only the events in the plugin SDK's event catalog. Theme Songs listened for Silo's older `scan_complete` event, which those builds no longer send, so it never ran after a scan. It now listens for `catalog.library.changed`, and still accepts `scan_complete` from older Silo versions. Changes that add no items, such as metadata edits, don't start a run. Thanks to @ArmoiraglatZ (#9).
+- Silo stops a plugin after 30 minutes without calls between the two, and Theme Songs' downloads don't count, so a full run of a large library could be stopped partway through. While a run lasts, Theme Songs now calls Silo every 5 minutes, so Silo leaves it running. Thanks to @ArmoiraglatZ (#10).
 
-Nothing needs to be cleared after upgrading. The next run looks up the items that were reported as absent. For a run right away, choose **Download now** on the Theme Songs page.
+Nothing needs to be changed after upgrading. Items a stopped run didn't reach are picked up by the next full run. For a run right away, choose **Download now** on the Theme Songs page.
 
 Linux amd64 and arm64 binaries and checksums are attached.
