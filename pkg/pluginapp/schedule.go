@@ -218,6 +218,9 @@ func (s *Server) HandleEvent(_ context.Context, req *pluginv1.HandleEventRequest
 	s.activate()
 	switch req.GetEventName() {
 	case eventLibraryChanged, eventScanComplete:
+		if noNewItems(req.GetPayload()) {
+			return &pluginv1.HandleEventResponse{}, nil
+		}
 		if id := eventLibrary(req.GetPayload()); id != "" {
 			s.log.Debug("library scan finished", "library", id, "event", req.GetEventName())
 			s.noteScan(id)
@@ -240,6 +243,14 @@ func eventLibrary(p *structpb.Struct) string {
 		}
 	}
 	return ""
+}
+
+// noNewItems reports whether a catalog.library.changed payload says the
+// change added no items, as metadata edits and removals do. A run for new
+// items has nothing to do then. Payloads without the count still count.
+func noNewItems(p *structpb.Struct) bool {
+	v, ok := p.GetFields()["new"].GetKind().(*structpb.Value_NumberValue)
+	return ok && v.NumberValue <= 0
 }
 
 func (s *Server) noteScan(library string) {

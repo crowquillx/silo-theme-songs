@@ -183,7 +183,7 @@ type Server struct {
 	scanTimer    *time.Timer
 	// keepAlive tells the host the plugin is still working, every
 	// keepAliveEvery while a run lasts; see hostKeepAlive.
-	keepAlive      func(context.Context)
+	keepAlive      func(context.Context) error
 	keepAliveEvery time.Duration
 }
 
@@ -533,27 +533,42 @@ func (s *Server) keepRunning(done <-chan struct{}) {
 	}
 	t := time.NewTicker(s.keepAliveEvery)
 	defer t.Stop()
+	warned := false
 	for {
 		select {
 		case <-done:
 			return
 		case <-t.C:
-			s.keepAlive(context.Background())
+		}
+		// A tick and done can be ready together; never call after the run.
+		select {
+		case <-done:
+			return
+		default:
+		}
+		if err := s.keepAlive(context.Background()); err != nil {
+			if !warned {
+				s.log.Warn("cannot reach the host; Silo may stop the plugin during this run", "error", err)
+				warned = true
+			} else {
+				s.log.Debug("keepalive failed", "error", err)
+			}
 		}
 	}
 }
 
 // hostKeepAlive makes a cheap call back into the host. Silo counts the
 // plugin's calls to the host as use, so it does not stop the process while a
-// run continues. Silo ignores the manifest's stay_running for now.
-func hostKeepAlive(ctx context.Context) {
+// run continues. Silo does not honour a stay_running manifest setting yet.
+func hostKeepAlive(ctx context.Context) error {
 	host := sdkruntime.Host()
 	if host == nil {
-		return
+		return errors.New("host broker not available")
 	}
 	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
-	_, _ = host.GetHostInfo(ctx)
+	_, err := host.GetHostInfo(ctx)
+	return err
 }
 
 // setProgress updates the status of the running task.

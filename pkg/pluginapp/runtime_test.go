@@ -569,10 +569,11 @@ func TestRunKeepsPluginAlive(t *testing.T) {
 	s, cfg := newTestServer(t, silo, p, nil)
 	var calls atomic.Int32
 	s.keepAliveEvery = 5 * time.Millisecond
-	s.keepAlive = func(context.Context) {
+	s.keepAlive = func(context.Context) error {
 		if calls.Add(1) == 3 {
 			close(release)
 		}
+		return nil
 	}
 	if e := s.ConfigureLocal(context.Background(), cfg); e != nil {
 		t.Fatal(e)
@@ -583,11 +584,12 @@ func TestRunKeepsPluginAlive(t *testing.T) {
 	select {
 	case <-release:
 	case <-time.After(5 * time.Second):
+		s.work.Unlock()
 		t.Fatal("no keepalive while the run lasts")
 	}
 	s.work.Unlock()
 	<-j.done
-	time.Sleep(20 * time.Millisecond)
+	time.Sleep(100 * time.Millisecond)
 	after := calls.Load()
 	time.Sleep(50 * time.Millisecond)
 	if calls.Load() != after {
@@ -1016,5 +1018,33 @@ func TestUnknownSymlinkIsDeferred(t *testing.T) {
 	}
 	if _, err := os.Lstat(filepath.Join(item.dir, "theme-music")); !os.IsNotExist(err) {
 		t.Fatalf("wrote beside an unknown symlink: %v", err)
+	}
+}
+
+// Catalog changes that add no items, such as metadata edits, start no run.
+func TestLibraryChangeWithoutNewItems(t *testing.T) {
+	silo := newFakeSilo(t, "movies")
+	s, cfg := newTestServer(t, silo, &fakeProvider{staged: stagedAudio(t)}, nil)
+	s.auto, s.startDelay, s.scanDelay = true, time.Hour, time.Hour
+	if e := s.ConfigureLocal(context.Background(), cfg); e != nil {
+		t.Fatal(e)
+	}
+	for _, c := range []struct {
+		payload map[string]any
+		noted   bool
+	}{
+		{map[string]any{"library_id": "lib", "reason": "metadata", "new": 0}, false},
+		{map[string]any{"library_id": "lib", "reason": "scan", "new": 2}, true},
+		{map[string]any{"library_id": "lib"}, true},
+	} {
+		payload, _ := structpb.NewStruct(c.payload)
+		s.HandleEvent(context.Background(), &pluginv1.HandleEventRequest{EventName: "catalog.library.changed", Payload: payload})
+		s.mu.Lock()
+		noted := s.scanned["lib"]
+		s.scanned = map[string]bool{}
+		s.mu.Unlock()
+		if noted != c.noted {
+			t.Fatalf("%v: library noted %v", c.payload, noted)
+		}
 	}
 }
