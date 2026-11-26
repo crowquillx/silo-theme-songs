@@ -39,6 +39,7 @@
       "display_name": "Theme Songs after library scans",
       "description": "Downloads themes for new items after Silo scans a library.",
       "subscriptions": [
+        "catalog.library.changed",
         "scan_complete"
       ]
     },
