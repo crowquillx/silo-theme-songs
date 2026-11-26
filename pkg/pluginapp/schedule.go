@@ -16,6 +16,11 @@ import (
 	"google.golang.org/protobuf/types/known/structpb"
 )
 
+// Silo also stops a plugin process that has gone 30 minutes without a call in
+// either direction (Silo-Server/silo-server#3960, 2026-11-12). Its own work,
+// downloads included, does not count, so a run calls back into the host
+// every few minutes; see keepAlive.
+//
 // Silo registers plugin tasks only when it starts and runs them only at
 // startup unless an administrator adds a trigger, so the plugin also runs
 // itself: a full run when its settings change or the last full run is a day
@@ -196,22 +201,35 @@ func (s *Server) automate(ctx context.Context, cfg Config) {
 	}
 }
 
-// HandleEvent receives Silo's scan_complete events. Silo publishes one per
+// Library scan events. Since Silo-Server/silo-server#3547 (2026-11-18) Silo
+// delivers only the events in the SDK's event catalog, and its scans announce
+// themselves to plugins as catalog.library.changed. Earlier hosts delivered
+// their internal scan_complete instead and may deliver both; newer ones skip
+// the scan_complete subscription.
+const (
+	eventLibraryChanged = "catalog.library.changed"
+	eventScanComplete   = "scan_complete"
+)
+
+// HandleEvent receives Silo's library scan events. Silo publishes one per
 // scanned library folder, including the scans the plugin requests itself, so
 // events only note the library; a run follows once scans settle.
 func (s *Server) HandleEvent(_ context.Context, req *pluginv1.HandleEventRequest) (*pluginv1.HandleEventResponse, error) {
 	s.activate()
-	if req.GetEventName() == "scan_complete" {
+	switch req.GetEventName() {
+	case eventLibraryChanged, eventScanComplete:
 		if id := eventLibrary(req.GetPayload()); id != "" {
-			s.log.Debug("library scan finished", "library", id)
+			s.log.Debug("library scan finished", "library", id, "event", req.GetEventName())
 			s.noteScan(id)
 		}
 	}
 	return &pluginv1.HandleEventResponse{}, nil
 }
 
-// eventLibrary reads the library ID of a scan_complete event. Silo sends the
-// ID as the event's bare payload, which reaches plugins as {"raw": "12"}.
+// eventLibrary reads the library ID of a scan event. catalog.library.changed
+// carries it as {"library_id": "12"}, a number on hosts before
+// Silo-Server/silo-server#4559. scan_complete sends the ID as the event's bare
+// payload, which reaches plugins as {"raw": "12"}.
 func eventLibrary(p *structpb.Struct) string {
 	for _, key := range []string{"raw", "library_id"} {
 		switch v := p.GetFields()[key].GetKind().(type) {

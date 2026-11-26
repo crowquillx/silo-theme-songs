@@ -74,3 +74,23 @@ func TestEmbeddedManifestLoads(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+// Silo delivers only catalog events to plugins since
+// Silo-Server/silo-server#3547; older hosts send scan_complete.
+func TestManifestSubscribesToLibraryScans(t *testing.T) {
+	var m pluginv1.PluginManifest
+	if err := protojson.Unmarshal(manifestJSON, &m); err != nil {
+		t.Fatal(err)
+	}
+	want := map[string]bool{"catalog.library.changed": true, "scan_complete": true}
+	for _, c := range m.GetCapabilities() {
+		if c.GetType() == "event_consumer.v1" {
+			for _, name := range c.GetSubscriptions() {
+				delete(want, name)
+			}
+		}
+	}
+	if len(want) > 0 {
+		t.Fatalf("missing subscriptions %v", want)
+	}
+}

@@ -20,6 +20,7 @@ import (
 	"time"
 
 	pluginv1 "github.com/Silo-Server/silo-plugin-sdk/pkg/pluginproto/silo/plugin/v1"
+	sdkruntime "github.com/Silo-Server/silo-plugin-sdk/pkg/pluginsdk/runtime"
 	"github.com/crowquillx/silo-theme-songs/pkg/destinations"
 	"github.com/crowquillx/silo-theme-songs/pkg/engine"
 	"github.com/crowquillx/silo-theme-songs/pkg/provider"
@@ -180,6 +181,10 @@ type Server struct {
 	confirmWaits []time.Duration
 	scanned      map[string]bool
 	scanTimer    *time.Timer
+	// keepAlive tells the host the plugin is still working, every
+	// keepAliveEvery while a run lasts; see hostKeepAlive.
+	keepAlive      func(context.Context)
+	keepAliveEvery time.Duration
 }
 
 type job struct {
@@ -192,18 +197,20 @@ type job struct {
 // not nil, the AnimeThemes provider factory.
 func New(m *pluginv1.PluginManifest, general, anime Factory) *Server {
 	s := &Server{
-		manifest:     m,
-		factory:      general,
-		animeFactory: anime,
-		configErr:    errNoAPIKey,
-		report:       Report{State: "not_configured", Rows: []Row{}},
-		jobs:         map[string]*job{},
-		log:          hclog.NewNullLogger(),
-		startDelay:   20 * time.Second,
-		scanDelay:    time.Minute,
-		confirmWaits: []time.Duration{time.Second, 2 * time.Second, 4 * time.Second},
-		scanned:      map[string]bool{},
-		legacyAnime:  legacyAnimeEnabled,
+		manifest:       m,
+		factory:        general,
+		animeFactory:   anime,
+		configErr:      errNoAPIKey,
+		report:         Report{State: "not_configured", Rows: []Row{}},
+		jobs:           map[string]*job{},
+		log:            hclog.NewNullLogger(),
+		startDelay:     20 * time.Second,
+		scanDelay:      time.Minute,
+		confirmWaits:   []time.Duration{time.Second, 2 * time.Second, 4 * time.Second},
+		scanned:        map[string]bool{},
+		legacyAnime:    legacyAnimeEnabled,
+		keepAlive:      hostKeepAlive,
+		keepAliveEvery: 5 * time.Minute,
 	}
 	s.jobCtx, s.cancelJobs = context.WithCancel(context.Background())
 	return s
@@ -507,6 +514,7 @@ func (s *Server) start(mode string, only map[string][]string) *job {
 	ctx, cancel := context.WithCancel(s.jobCtx)
 	j := &job{done: make(chan struct{}), cancel: cancel}
 	s.jobs[key] = j
+	go s.keepRunning(j.done)
 	go func() {
 		defer cancel()
 		j.report = s.Execute(ctx, mode, only)
@@ -514,6 +522,38 @@ func (s *Server) start(mode string, only map[string][]string) *job {
 		close(j.done)
 	}()
 	return j
+}
+
+// keepRunning calls keepAlive every keepAliveEvery until done is closed.
+// Silo stops a plugin after 30 minutes without a call in either direction,
+// and a run's downloads and Silo API requests are not such calls.
+func (s *Server) keepRunning(done <-chan struct{}) {
+	if s.keepAlive == nil || s.keepAliveEvery <= 0 {
+		return
+	}
+	t := time.NewTicker(s.keepAliveEvery)
+	defer t.Stop()
+	for {
+		select {
+		case <-done:
+			return
+		case <-t.C:
+			s.keepAlive(context.Background())
+		}
+	}
+}
+
+// hostKeepAlive makes a cheap call back into the host. Silo counts the
+// plugin's calls to the host as use, so it does not stop the process while a
+// run continues. Silo ignores the manifest's stay_running for now.
+func hostKeepAlive(ctx context.Context) {
+	host := sdkruntime.Host()
+	if host == nil {
+		return
+	}
+	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+	_, _ = host.GetHostInfo(ctx)
 }
 
 // setProgress updates the status of the running task.

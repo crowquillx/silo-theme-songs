@@ -503,8 +503,9 @@ func TestNewItemRunAfterLibraryScan(t *testing.T) {
 		t.Fatalf("schedule after full run: %+v %v", saved, err)
 	}
 	silo.addMovie("movie:2", "Second")
-	payload, _ := structpb.NewStruct(map[string]any{"raw": "lib"})
-	if _, e := s.HandleEvent(ctx, &pluginv1.HandleEventRequest{EventName: "scan_complete", Payload: payload}); e != nil {
+	// Silo's catalog event, as hosts since Silo-Server/silo-server#3547 send it.
+	payload, _ := structpb.NewStruct(map[string]any{"library_id": "lib", "reason": "scan", "new": 1})
+	if _, e := s.HandleEvent(ctx, &pluginv1.HandleEventRequest{EventName: "catalog.library.changed", Payload: payload}); e != nil {
 		t.Fatal(e)
 	}
 	deadline := time.Now().Add(5 * time.Second)
@@ -534,6 +535,63 @@ func TestNewItemRunAfterLibraryScan(t *testing.T) {
 	}
 	if silo.apiCalls.Load()-calls > 3 {
 		t.Fatalf("%d API calls to find no new items", silo.apiCalls.Load()-calls)
+	}
+}
+
+// Older hosts send their internal scan_complete event instead.
+func TestScanCompleteEventNotesLibrary(t *testing.T) {
+	silo := newFakeSilo(t, "movies")
+	s, cfg := newTestServer(t, silo, &fakeProvider{staged: stagedAudio(t)}, nil)
+	s.auto, s.startDelay, s.scanDelay = true, time.Hour, time.Hour
+	if e := s.ConfigureLocal(context.Background(), cfg); e != nil {
+		t.Fatal(e)
+	}
+	payload, _ := structpb.NewStruct(map[string]any{"raw": "lib"})
+	for _, name := range []string{"scan_complete", "scan.completed", "other"} {
+		s.HandleEvent(context.Background(), &pluginv1.HandleEventRequest{EventName: name, Payload: payload})
+		s.mu.Lock()
+		noted := s.scanned["lib"]
+		s.scanned = map[string]bool{}
+		s.mu.Unlock()
+		if noted != (name == "scan_complete") {
+			t.Fatalf("%s: library noted %v", name, noted)
+		}
+	}
+}
+
+// Silo stops a plugin that goes 30 minutes without a call in either
+// direction, so a run calls the host until it ends.
+func TestRunKeepsPluginAlive(t *testing.T) {
+	silo := newFakeSilo(t, "movies")
+	silo.addMovie("movie:1", "First")
+	release := make(chan struct{})
+	p := &fakeProvider{staged: stagedAudio(t)}
+	s, cfg := newTestServer(t, silo, p, nil)
+	var calls atomic.Int32
+	s.keepAliveEvery = 5 * time.Millisecond
+	s.keepAlive = func(context.Context) {
+		if calls.Add(1) == 3 {
+			close(release)
+		}
+	}
+	if e := s.ConfigureLocal(context.Background(), cfg); e != nil {
+		t.Fatal(e)
+	}
+	// Hold the run until the host has been called a few times.
+	s.work.Lock()
+	j := s.start("sync", nil)
+	select {
+	case <-release:
+	case <-time.After(5 * time.Second):
+		t.Fatal("no keepalive while the run lasts")
+	}
+	s.work.Unlock()
+	<-j.done
+	time.Sleep(20 * time.Millisecond)
+	after := calls.Load()
+	time.Sleep(50 * time.Millisecond)
+	if calls.Load() != after {
+		t.Fatal("keepalive continued after the run")
 	}
 }
 
@@ -784,7 +842,7 @@ func TestRedirectsKeepHostTheme(t *testing.T) {
 }
 
 func TestEventLibraryPayloads(t *testing.T) {
-	for raw, want := range map[string]string{`{"raw":"12"}`: "12", `{"library_id":7}`: "7", `{}`: ""} {
+	for raw, want := range map[string]string{`{"raw":"12"}`: "12", `{"library_id":7}`: "7", `{"library_id":"3","reason":"scan","new":1}`: "3", `{}`: ""} {
 		var m map[string]any
 		json.Unmarshal([]byte(raw), &m)
 		p, _ := structpb.NewStruct(m)
