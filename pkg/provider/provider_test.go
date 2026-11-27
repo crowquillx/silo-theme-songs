@@ -256,6 +256,42 @@ func TestMissingToolsAndCircuitBreaker(t *testing.T) {
 	}
 }
 
+// ThemerrDB links some videos YouTube has since removed or made private.
+// yt-dlp still works for them, so they must not pause extraction for the
+// valid videos that follow. A video reported unavailable without a reason
+// asks for an early yt-dlp update instead, since a broken yt-dlp can say the
+// same about a playable video.
+func TestUnavailableVideosDoNotOpenCircuit(t *testing.T) {
+	probe := "echo '{\"format\":{\"format_name\":\"mp3\"},\"streams\":[{\"codec_type\":\"audio\",\"codec_name\":\"mp3\",\"channels\":2}]}'"
+	installer := &fakeInstaller{}
+	d := &Downloader{youtube: newYouTubeLimiter(0), StageParent: t.TempDir(), Installer: installer}
+	for _, id := range []string{"abcdefghijk", "bcdefghijkl", "cdefghijklm", "defghijklmn"} {
+		for _, tc := range []struct {
+			reason string
+			stale  bool
+		}{
+			{"Video unavailable. This video is no longer available due to a copyright claim", false},
+			{"Private video. Sign in if you've been granted access to this video", false},
+			{"Video unavailable. This video has been removed by the uploader", false},
+			{"Video unavailable", true},
+			{"This video is not available", true},
+		} {
+			installer.stale = false
+			d.Tools = tools(t, "echo \"ERROR: [youtube] "+id+": "+tc.reason+"\" >&2; exit 1", probe)
+			_, err := d.Fetch(context.Background(), Source{URL: "https://youtu.be/" + id, Format: "mp3", Extract: true})
+			if !IsCode(err, UnavailableMedia) || installer.stale != tc.stale {
+				t.Fatalf("%s %q: %v stale=%v", id, tc.reason, err, installer.stale)
+			}
+		}
+	}
+	d.Tools = tools(t, "printf audio > theme.mp3", probe)
+	staged, err := d.Fetch(context.Background(), Source{URL: "https://youtu.be/efghijklmno", Format: "mp3", Extract: true})
+	if err != nil {
+		t.Fatalf("valid video after unavailable ones: %v", err)
+	}
+	staged.Close()
+}
+
 func TestProcessGroupCancellation(t *testing.T) {
 	stage := t.TempDir()
 	marker := filepath.Join(t.TempDir(), "child-finished")

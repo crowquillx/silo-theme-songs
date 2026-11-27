@@ -102,17 +102,24 @@ func TestExtractorFailuresAreActionableAndRedacted(t *testing.T) {
 	for _, tc := range []struct {
 		message string
 		code    Code
+		op      string
 	}{
-		{"ERROR HTTP Error 429 https://secret.example/?token=secret", RateLimited},
-		{"ERROR This content isn't available, try again later", RateLimited},
-		{"ERROR Sign in to confirm you're not a bot", AuthenticationRequired},
-		{"WARNING challenge solving failed; install yt-dlp-ejs", MissingTool},
-		{"ERROR Unable to download API page: HTTP Error 503", Transient},
-		{"ERROR Video unavailable /private/path token=secret", UnavailableMedia},
+		{"ERROR HTTP Error 429 https://secret.example/?token=secret", RateLimited, ""},
+		{"ERROR This content isn't available, try again later", RateLimited, ""},
+		{"ERROR Sign in to confirm you're not a bot", AuthenticationRequired, ""},
+		{"WARNING challenge solving failed; install yt-dlp-ejs", MissingTool, ""},
+		{"ERROR Unable to download API page: HTTP Error 503", Transient, ""},
+		{"ERROR Video unavailable /private/path token=secret", UnavailableMedia, unconfirmedUnavailable},
+		{"ERROR: [youtube] abcdefghijk: This video is not available", UnavailableMedia, unconfirmedUnavailable},
+		{"ERROR: [youtube] abcdefghijk: Video unavailable. This video has been removed by the uploader", UnavailableMedia, "YouTube video is unavailable"},
+		{"ERROR: [youtube] abcdefghijk: Private video. Sign in if you've been granted access to this video", UnavailableMedia, "YouTube video is unavailable"},
+		{"ERROR: [youtube] abcdefghijk: Join this channel to get access to members-only content like this video", UnavailableMedia, "YouTube video is unavailable"},
+		{"WARNING: [youtube] abcdefghijk: nsig extraction failed\nERROR: [youtube] abcdefghijk: Requested format is not available", UnavailableMedia, unexplainedFailure},
 	} {
 		err := extractorError([]byte(tc.message))
-		if !IsCode(err, tc.code) || strings.Contains(err.Error(), "secret") || strings.Contains(err.Error(), "/private/") {
-			t.Fatalf("classification: %v", err)
+		var e *Error
+		if !IsCode(err, tc.code) || tc.op != "" && (!errors.As(err, &e) || e.Op != tc.op) || strings.Contains(err.Error(), "secret") || strings.Contains(err.Error(), "/private/") {
+			t.Fatalf("classification of %q: %v", tc.message, err)
 		}
 	}
 }

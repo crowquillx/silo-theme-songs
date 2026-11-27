@@ -16,6 +16,7 @@ import (
 	pluginv1 "github.com/Silo-Server/silo-plugin-sdk/pkg/pluginproto/silo/plugin/v1"
 	"github.com/crowquillx/silo-theme-songs/pkg/destinations"
 	"github.com/crowquillx/silo-theme-songs/pkg/engine"
+	"github.com/crowquillx/silo-theme-songs/pkg/provider"
 	"github.com/crowquillx/silo-theme-songs/pkg/siloapi"
 	"github.com/hashicorp/go-hclog"
 	"google.golang.org/protobuf/types/known/structpb"
@@ -54,6 +55,28 @@ func TestPublicationRequestsScanAndConfirmsDiscovery(t *testing.T) {
 	status, e := s.Handle(ctx, &pluginv1.HandleHTTPRequest{Method: "GET", Path: "/status"})
 	if e != nil || strings.Contains(string(status.Body), "fixture-secret") {
 		t.Fatal("credential in report")
+	}
+}
+
+// An open extractor circuit breaker skips the download without trying it, so
+// the item is deferred to the next run rather than reported as failed, and
+// the run still asks for attention.
+func TestPausedExtractionDefersDownload(t *testing.T) {
+	ctx := context.Background()
+	silo := newFakeSilo(t, "movies")
+	silo.addMovie("movie:fixture", "Fixture")
+	p := &fakeProvider{staged: stagedAudio(t), fetchErr: &provider.Error{Code: provider.ExtractorBroken, Op: "paused"}}
+	s, cfg := newTestServer(t, silo, p, nil)
+	if e := s.ConfigureLocal(ctx, cfg); e != nil {
+		t.Fatal(e)
+	}
+	r := s.Execute(ctx, "sync", nil)
+	if r.Downloaded != 0 || len(r.Rows) != 1 || r.Rows[0].Action != "deferred" || r.Rows[0].Reason != extractionPaused || r.State != "needs_attention" {
+		t.Fatalf("paused extraction: %+v", r)
+	}
+	p.fetchErr = nil
+	if r = s.Execute(ctx, "sync", nil); r.Downloaded != 1 {
+		t.Fatalf("deferred item not retried: %+v", r)
 	}
 }
 
