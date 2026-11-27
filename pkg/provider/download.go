@@ -265,7 +265,7 @@ func (d *Downloader) Fetch(ctx context.Context, source Source) (_ *StagedAudio, 
 		blocked := time.Now().Before(d.brokenUntil)
 		d.mu.Unlock()
 		if blocked {
-			return nil, &Error{ExtractorBroken, "circuit open"}
+			return nil, &Error{ExtractorBroken, "YouTube downloads paused after repeated yt-dlp failures"}
 		}
 	}
 	versions, err := d.Preflight(jobCtx, source)
@@ -289,10 +289,12 @@ func (d *Downloader) Fetch(ctx context.Context, source Source) (_ *StagedAudio, 
 	if source.Extract {
 		path, format, err = d.extract(jobCtx, dir, source.URL, max, versions)
 		if err != nil {
-			if IsCode(err, UnavailableMedia) {
+			var e *Error
+			unavailable := errors.As(err, &e) && e.Code == UnavailableMedia
+			if unavailable && e.Op == unexplainedFailure {
 				d.recordFailure(source.URL)
 			}
-			if IsCode(err, MissingTool) && d.Installer != nil {
+			if (IsCode(err, MissingTool) || unavailable && e.Op == unconfirmedUnavailable) && d.Installer != nil {
 				d.Installer.MarkStale()
 			}
 			return nil, err
@@ -346,6 +348,10 @@ func (d *Downloader) Fetch(ctx context.Context, source Source) (_ *StagedAudio, 
 	return &StagedAudio{Path: path, Format: "mp3", Size: info.Size(), dir: dir}, nil
 }
 
+// recordFailure notes an unexplained yt-dlp failure. Three different videos
+// failing this way since the last successful extraction suggest that yt-dlp no
+// longer works with YouTube, so extraction pauses for ten minutes and the
+// installer checks for an update.
 func (d *Downloader) recordFailure(rawURL string) {
 	d.mu.Lock()
 	defer d.mu.Unlock()

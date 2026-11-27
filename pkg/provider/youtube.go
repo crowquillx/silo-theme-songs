@@ -123,11 +123,57 @@ func extractorError(output []byte) error {
 		return &Error{AuthenticationRequired, "YouTube requires authentication; use an accessible selected source"}
 	case strings.Contains(text, "no supported javascript runtime"), strings.Contains(text, "challenge solving failed"), strings.Contains(text, "challenge solver"), strings.Contains(text, "yt-dlp-ejs"):
 		return &Error{MissingTool, "update yt-dlp with its EJS package and configure a supported js_runtime"}
-	case strings.Contains(text, "video is unavailable"), strings.Contains(text, "private video"), strings.Contains(text, "has been removed"), strings.Contains(text, "account associated with this video has been terminated"):
+	case mentionsAny(text, unavailableReasons):
 		return &Error{UnavailableMedia, "YouTube video is unavailable"}
+	case mentionsAny(text, unavailableWithoutReason):
+		return &Error{UnavailableMedia, unconfirmedUnavailable}
 	case strings.Contains(text, "http error 503"), strings.Contains(text, "http error 502"), strings.Contains(text, "http error 500"), strings.Contains(text, "timed out"), strings.Contains(text, "unable to download"), strings.Contains(text, "temporary failure"):
 		return &Error{Transient, "YouTube transport; retry later"}
 	default:
-		return &Error{UnavailableMedia, "extractor"}
+		return &Error{UnavailableMedia, unexplainedFailure}
 	}
+}
+
+// unexplainedFailure is the Op of a yt-dlp failure no known message explains.
+// Only these failures count toward the extractor circuit breaker: a video that
+// YouTube reports as unavailable shows that yt-dlp itself still works.
+const unexplainedFailure = "extractor"
+
+// unconfirmedUnavailable is the Op of a video reported unavailable without a
+// reason. Usually the video is gone, but an outdated yt-dlp whose YouTube
+// clients fail can say the same about a playable video, so it asks for an
+// early yt-dlp update check without opening the circuit breaker.
+const unconfirmedUnavailable = "YouTube reports the video unavailable"
+
+// unavailableReasons are YouTube's reasons for a video that no client can
+// play: deleted, private, blocked or limited to channel members. yt-dlp prints
+// most of them after "Video unavailable.".
+var unavailableReasons = []string{
+	"video is no longer available",
+	"private video",
+	"video is private",
+	"has been removed",
+	"account associated with this video has been terminated",
+	"not made this video available in your country",
+	"not available in your country",
+	"not available from your location",
+	"blocked it in your country",
+	"members-only",
+	"available to this channel's members",
+	"join this channel to get access",
+}
+
+var unavailableWithoutReason = []string{
+	"video unavailable",
+	"video is unavailable",
+	"video is not available",
+}
+
+func mentionsAny(text string, substrings []string) bool {
+	for _, m := range substrings {
+		if strings.Contains(text, m) {
+			return true
+		}
+	}
+	return false
 }

@@ -605,6 +605,10 @@ type run struct {
 	deferred *source
 }
 
+// extractionPaused explains a download skipped while the extractor circuit
+// breaker is open.
+const extractionPaused = "YouTube downloads are paused after repeated yt-dlp failures; the next daily run tries again"
+
 // Execute runs a task. mode is "sync" or "preview"; only limits the run to
 // listed items per library.
 func (s *Server) Execute(ctx context.Context, mode string, only map[string][]string) (report Report) {
@@ -772,6 +776,9 @@ func (s *Server) Execute(ctx context.Context, mode string, only map[string][]str
 			if r.Action == "prerequisite_failed" {
 				report.State = "prerequisite_failed"
 				break
+			}
+			if r.Action == "deferred" && r.Reason == extractionPaused {
+				report.State = "needs_attention"
 			}
 			if r.Action == "refused" || r.Action == "download_failed" || r.Action == "source_unavailable" || r.Action == "stale" || r.Action == "protected" || r.Action == "destination_unconfirmed" || r.Action == "selection_changed" || r.Action == "operator_review" {
 				report.State = "needs_attention"
@@ -1061,6 +1068,15 @@ func (s *Server) processTarget(r *run, src *source, inv siloapi.Inventory, item 
 			}
 			s.setProgress("%s: downloading %s", taskName(r.mode), item.Title)
 			staged, err := src.provider.Fetch(ctx, candidate)
+			if provider.IsCode(err, provider.ExtractorBroken) {
+				// Nothing was tried. Failed downloads are not saved, so the
+				// next full run tries this item again; runs for new items
+				// skip it as already known.
+				out.Action = "deferred"
+				out.Reason = extractionPaused
+				report.add(out)
+				continue
+			}
 			if err != nil {
 				s.log.Warn("download failed", "item", item.Title, "season", sn, "error", err)
 				out.Action = "download_failed"
